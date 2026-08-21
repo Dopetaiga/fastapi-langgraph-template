@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0f1117">
+  <title>Agent Runtime — Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <a href="#main" class="skip-link">跳转到主内容</a>
+  <div class="app">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="logo">
+        <span class="logo-icon" aria-hidden="true">&#9678;</span>
+        <span class="logo-text">Agent Runtime</span>
+      </div>
+      <ul class="nav">
+        <li class="active"><a href="#" data-page="dashboard" aria-label="仪表盘">&#9632; 仪表盘</a></li>
+        <li><a href="#" data-page="runs" aria-label="Run 管理">&#9656; Run 管理</a></li>
+        <li><a href="#" data-page="approvals" aria-label="审批">&#10003; 审批</a></li>
+        <li><a href="#" data-page="memory" aria-label="记忆">&#128451; 记忆</a></li>
+        <li><a href="#" data-page="graph" aria-label="图拓扑">&#9899; 图拓扑</a></li>
+      </ul>
+      <div class="sidebar-footer">
+        <span class="status-dot" aria-hidden="true"></span> <span>运行中</span>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main" id="main">
+      <!-- Dashboard -->
+      <section id="page-dashboard" class="page active">
+        <h1>仪表盘</h1>
+        <div class="cards">
+          <div class="card">
+            <div class="card-label">总 Run 数</div>
+            <div class="card-value" id="stat-total">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">运行中</div>
+            <div class="card-value" id="stat-running">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">已完成</div>
+            <div class="card-value" id="stat-completed">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">失败</div>
+            <div class="card-value" id="stat-failed">0</div>
+          </div>
+          <div class="card">
+            <div class="card-label">待审批</div>
+            <div class="card-value" id="stat-approvals">0</div>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" onclick="app.createRun()">+ 新建 Run</button>
+          <button class="btn btn-secondary" onclick="app.runWorker()">运行 Worker</button>
+        </div>
+        <h2>最近 Run</h2>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>图</th>
+                <th>输入</th>
+                <th>状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="runs-table-body">
+              <tr><td colspan="6" class="empty">暂无数据，点击「新建 Run」开始</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Create Run -->
+      <section id="page-create-run" class="page">
+        <h1>新建 Run</h1>
+        <div class="form-card">
+          <div class="form-group">
+            <label for="cr-session">Session ID</label>
+            <input type="text" id="cr-session" name="session_id" autocomplete="off" placeholder="session-001" value="session-001">
+          </div>
+          <div class="form-group">
+            <label for="cr-graph">Graph Name</label>
+            <input type="text" id="cr-graph" name="graph_name" autocomplete="off" placeholder="default" value="default">
+          </div>
+          <div class="form-group">
+            <label for="cr-input">输入文本</label>
+            <textarea id="cr-input" name="input_text" rows="4" placeholder="输入你的请求…" spellcheck="false">calculate 1+1</textarea>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" onclick="app.submitCreateRun()">创建并执行</button>
+            <button class="btn btn-ghost" onclick="app.navigate('dashboard')">取消</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Run Detail -->
+      <section id="page-run-detail" class="page">
+        <div class="page-header">
+          <h1>Run Detail</h1>
+          <button class="btn btn-ghost" onclick="app.navigate('dashboard')" aria-label="返回仪表盘">← 返回</button>
+        </div>
+        <div class="run-info" id="run-info"></div>
+        <h2>事件流</h2>
+        <div class="event-stream" id="event-stream">
+          <div class="empty">等待事件…</div>
+        </div>
+      </section>
+
+      <!-- Approvals -->
+      <section id="page-approvals" class="page">
+        <h1>审批管理</h1>
+        <div class="form-group">
+          <label for="apr-run-id">Run ID</label>
+          <input type="text" id="apr-run-id" name="run_id" autocomplete="off" placeholder="输入 run_id" value="">
+        </div>
+        <button class="btn btn-primary" onclick="app.loadApprovals()">查询待审批</button>
+        <div class="table-wrap" style="margin-top: 1rem;">
+          <table class="table">
+            <thead>
+              <tr><th>ID</th><th>Run ID</th><th>操作</th><th>状态</th><th>创建时间</th><th>操作</th></tr>
+            </thead>
+            <tbody id="approvals-table"><tr><td colspan="6" class="empty">输入 Run ID 查询</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Memory -->
+      <section id="page-memory" class="page">
+        <h1>记忆管理</h1>
+        <div class="tabs">
+          <button class="tab active" onclick="app.switchMemoryTab('user')">用户记忆</button>
+          <button class="tab" onclick="app.switchMemoryTab('team')">团队记忆</button>
+        </div>
+        <div id="memory-user" class="memory-panel">
+          <div class="form-row">
+            <input type="text" id="mem-user-id" name="user_id" autocomplete="off" placeholder="User ID" value="u1">
+            <input type="text" id="mem-user-key" name="key" autocomplete="off" placeholder="Key" value="lang">
+            <input type="text" id="mem-user-value" name="value" placeholder='{"key":"value"}' value='{"lang":"python"}' autocomplete="off">
+            <button class="btn btn-primary" onclick="app.putUserMemory()">存储</button>
+          </div>
+          <button class="btn btn-secondary" onclick="app.loadUserMemory()">刷新列表</button>
+          <div class="table-wrap" style="margin-top: 1rem;">
+            <table class="table">
+              <thead><tr><th>User ID</th><th>Key</th><th>Value</th><th>Namespace</th></tr></thead>
+              <tbody id="user-memory-table"><tr><td colspan="4" class="empty">点击「刷新列表」</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="memory-team" class="memory-panel" style="display:none;">
+          <div class="form-row">
+            <input type="text" id="mem-team-id" name="team_id" autocomplete="off" placeholder="Team ID" value="team-1">
+            <input type="text" id="mem-team-key" name="key" autocomplete="off" placeholder="Key" value="goal">
+            <input type="text" id="mem-team-value" name="value" placeholder='{"key":"value"}' value='{"goal":"launch"}' autocomplete="off">
+            <button class="btn btn-primary" onclick="app.putTeamMemory()">存储</button>
+          </div>
+          <button class="btn btn-secondary" onclick="app.loadTeamMemory()">刷新列表</button>
+          <div class="table-wrap" style="margin-top: 1rem;">
+            <table class="table">
+              <thead><tr><th>Team ID</th><th>Key</th><th>Value</th></tr></thead>
+              <tbody id="team-memory-table"><tr><td colspan="3" class="empty">点击「刷新列表」</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Graph -->
+      <section id="page-graph" class="page">
+        <h1>图拓扑</h1>
+        <div class="graph-canvas" id="graph-canvas">
+          <svg id="graph-svg" role="img" aria-label="图拓扑可视化"></svg>
+        </div>
+        <div class="graph-legend">
+          <span class="legend-item"><span class="dot llm" aria-hidden="true"></span>LLM</span>
+          <span class="legend-item"><span class="dot supervisor" aria-hidden="true"></span>Supervisor</span>
+          <span class="legend-item"><span class="dot tool" aria-hidden="true"></span>Tool</span>
+          <span class="legend-item"><span class="dot subagent" aria-hidden="true"></span>Subagent</span>
+          <span class="legend-item"><span class="dot rag" aria-hidden="true"></span>RAG</span>
+          <span class="legend-item"><span class="dot approval" aria-hidden="true"></span>Approval</span>
+          <span class="legend-item"><span class="dot transform" aria-hidden="true"></span>Transform</span>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast" aria-live="polite" role="status"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

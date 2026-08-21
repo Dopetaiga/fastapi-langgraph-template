@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.eggs/
+*.egg-info/
+dist/
+build/
+*.egg
+migrations/versions/__pycache__/
+
+# Environment
+.env
+.env.*.local
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
