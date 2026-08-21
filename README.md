@@ -49,9 +49,10 @@ uvicorn app.main:app --reload
 
 ## Documentation
 
-- `docs/ARCHITECTURE.md` — system design
-- `docs/modules/` — module contracts
-- `docs/USAGE.md` — user guide
+- `docs/USER_GUIDE.md` — **完整用户指南**（新手必读）
+- `docs/ARCHITECTURE.md` — 系统架构设计
+- `docs/modules/` — 模块契约
+- `docs/USAGE.md` — 技术 API 参考
 
 ## License
 
