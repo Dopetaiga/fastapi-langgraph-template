@@ -43,7 +43,7 @@ async def create_run(req: CreateRunRequest, manager: RunManager = Depends(get_ru
     run = await manager.create_run(req.session_id, req.graph_name, req.input_text)
     return RunResponse(
         run_id=run.id,
-        status=RunStatus(run.status.value),
+        status=RunStatus(run.status),
         graph_name=run.graph_name,
         input_text=run.input_text,
     )

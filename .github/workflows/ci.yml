@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master, main]
 
+env:
+  DATABASE_URL: postgresql+asyncpg://agent:agent@localhost:5432/agent_runtime
+  LITELLM_API_BASE: http://localhost:4000
+  LITELLM_API_KEY: sk-litellm
+
 jobs:
   lint:
     name: Lint

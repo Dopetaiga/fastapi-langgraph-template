@@ -5,6 +5,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select
+
 from app.capabilities.approval import ApprovalStore
 from app.capabilities.memory import MemoryService
 from app.capabilities.rag import Retriever, RAGScope
@@ -21,7 +23,7 @@ from app.db.engine import get_session
 from app.graph.compiler import CompiledGraph, compile_graph
 from app.graph.executor import GraphExecutor
 from app.graph.loader import load_graph_from_yaml
-from app.models.db import RunModel
+from app.models.db import RunModel, SessionModel
 from app.services.events import EventEmitter
 from app.services.errors import GraphValidationError
 from app.services.runtime_guards import RuntimeGuard
@@ -59,6 +61,14 @@ class RunManager:
     async def create_run(self, session_id: str, graph_name: str, input_text: str) -> RunModel:
         run_id = str(uuid.uuid4())
         async for session in get_session():
+            # Ensure session exists (foreign key requirement)
+            existing = await session.execute(
+                select(SessionModel).where(SessionModel.id == session_id)
+            )
+            if not existing.scalar_one_or_none():
+                session.add(SessionModel(id=session_id))
+                await session.flush()
+
             run = RunModel(
                 id=run_id,
                 session_id=session_id,
@@ -117,20 +127,18 @@ class RunManager:
 
     async def _update_run(self, run_id: str, status: RunStatus, output: str, error: str | None, reason: str | None) -> None:
         async for session in get_session():
-            from sqlalchemy import select, update
             stmt = (
-                update(RunModel)
-                .where(RunModel.id == run_id)
-                .values(
-                    status=status.value,
-                    output_text=output,
-                    error=error,
-                    termination_reason=reason,
-                    updated_at=datetime.now(timezone.utc),
-                )
+                select(RunModel).where(RunModel.id == run_id)
             )
-            await session.execute(stmt)
-            await session.commit()
+            result = await session.execute(stmt)
+            db_run = result.scalar_one_or_none()
+            if db_run:
+                db_run.status = status.value
+                db_run.output_text = output
+                db_run.error = error
+                db_run.termination_reason = reason
+                db_run.updated_at = datetime.now(timezone.utc)
+                await session.commit()
             return
 
     def _default_graph(self) -> CompiledGraph:
