@@ -1,6 +1,6 @@
 # Agent Runtime Starter
 
-> 面向学习工程实践的现代 Agent Runtime 参考实现。
+> 面向学习和工程实践的现代 Agent Runtime 参考实现。
 > A modern Agent Runtime reference for learning and engineering practice.
 
 Agent Runtime Starter 聚焦于：**如何把基于 LangGraph 的 Agent，从“能调用模型”做成可持久化、可恢复、可观测、可测试的后端运行时。**
