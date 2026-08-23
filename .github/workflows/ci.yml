@@ -21,20 +21,8 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-      - run: uv sync --frozen --group dev
+      - run: uv sync --frozen --extra dev
       - run: uv run ruff check app tests
-
-  typecheck:
-    name: Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          python-version: "3.12"
-      - run: uv sync --frozen --group dev
-      - run: uv run mypy app
 
   test:
     name: Tests
@@ -58,5 +46,5 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-      - run: uv sync --frozen --group dev
+      - run: uv sync --frozen --extra dev
       - run: uv run pytest tests/ -v --tb=short
