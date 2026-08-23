@@ -29,6 +29,10 @@ Use:
 FOR UPDATE SKIP LOCKED
 ```
 
+Delivery is at least once. Jobs have a lease owner, heartbeat/expiry, attempt
+count, retry schedule, and normalized last error. External writes receive a
+stable action id for idempotency.
+
 ## Worker Responsibilities
 
 - claim job
@@ -39,6 +43,8 @@ FOR UPDATE SKIP LOCKED
 - update terminal state
 - release/fail job
 - preserve trace context
+- resume only the immutable graph version bound to the Run
+- never claim a terminal Run
 
 ## Required Tests
 
@@ -47,6 +53,8 @@ FOR UPDATE SKIP LOCKED
 - worker crash + checkpoint resume
 - cancelled run stops
 - terminal run immutable
+- expired lease reclaim
+- duplicate delivery does not duplicate an approved side effect
 
 ## Acceptance
 

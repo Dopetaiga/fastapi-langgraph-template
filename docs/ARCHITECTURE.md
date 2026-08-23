@@ -56,6 +56,32 @@ LangGraph Runtime
 Runtime Events / OpenTelemetry
 ```
 
+## 2.1 Fixed Technology Decisions
+
+V1 fixes the following technologies:
+
+```text
+Graph orchestration and durable graph state -> LangGraph
+Application persistence and worker queue   -> PostgreSQL
+RAG vector storage                         -> PostgreSQL + pgvector
+Model gateway                              -> LiteLLM Proxy
+Long-term memory                           -> Mem0
+Trace format and propagation               -> OpenTelemetry
+```
+
+These are implementation decisions, not runtime-selectable providers. LiteLLM
+and Mem0 are isolated behind two thin boundaries:
+
+```text
+ModelGateway  -> LiteLLM HTTP/API contract
+MemoryStore -> Mem0 SDK/API contract
+```
+
+The boundaries own request mapping, timeouts, trace propagation, redaction, and
+error normalization. They do not implement provider discovery, dynamic backend
+selection, or a plugin system. Graph and application code must not import
+LiteLLM or Mem0 SDK types directly.
+
 ---
 
 # 3. Architectural Layers
@@ -153,25 +179,19 @@ Recommended control contract:
 
 ```text
 SupervisorDecision
-├── action
-├── target
-├── task
-├── payload
+├── action: tool | rag | subagent | approval | final
+├── capability_node_id
+├── resource
+│   ├── tool_name
+│   ├── knowledge_base_id
+│   └── subagent_id
+├── input
 └── final_response
 ```
 
-Allowed action classes:
-
-```text
-tool
-rag
-subagent
-approval
-node
-final
-```
-
-The implementation may use a narrower schema initially.
+`capability_node_id` must reference a declared node of the matching type.
+`resource` must pass that node's configured scope. Supervisor cannot jump to an
+arbitrary ordinary node or address an undeclared resource.
 
 The important invariant is:
 
@@ -181,6 +201,10 @@ decision != execution
 
 Supervisor decides.
 Capability node executes.
+
+Ordinary LLM nodes may appear in an explicit prelude before Supervisor. After
+the main loop enters Supervisor, all dynamic capability dispatch is owned by
+Supervisor. Ordinary LLM nodes never become a second dynamic controller.
 
 ---
 
@@ -284,6 +308,25 @@ step_count
 termination_reason
 error
 ```
+
+## 7.1 State Patch and Parallel Merge
+
+Nodes return a `StatePatch`; they do not replace `AgentState`. Every writable
+field declares one merge rule:
+
+```text
+messages          -> append
+tool_results      -> append
+rag_results       -> append
+subagent_results  -> merge_by_task_id
+control           -> supervisor_only
+runtime           -> runtime_only
+scalar data field -> one declared writer unless an explicit reducer exists
+```
+
+Parallel branches use deterministic task identifiers. Results merge by task id,
+not completion order. A graph with parallel writers and no reducer is rejected
+statically.
 
 ---
 
@@ -422,6 +465,10 @@ State.data.rag_results
 
 Memory is a fixed runtime integration, not a user graph concern.
 
+V1 uses Mem0 through `MemoryStore`. This is a thin anti-corruption boundary
+that keeps Mem0 SDK objects, credentials, and errors out of graph state and API
+contracts. It is not a multi-backend memory abstraction.
+
 Before run:
 
 ```text
@@ -445,6 +492,11 @@ conversation/outcome
   v
 memory extraction/update
 ```
+
+Personal memory update is a best-effort post-run operation. Memory failure does
+not change a completed Run to failed. Stored memories carry source-run,
+namespace, timestamp, and provenance metadata. Team memory is explicit-only.
+Secrets, raw credentials, and untrusted tool instructions are never stored.
 
 Keep namespaces logically separate:
 
@@ -490,6 +542,29 @@ Checkpoint provides:
 - replay
 - interrupt persistence
 
+## 13.1 Graph Version Binding
+
+Every Run binds immutable graph identity at creation:
+
+```text
+graph_name
+graph_version
+graph_definition_hash
+compiled_definition_snapshot or immutable version reference
+```
+
+Resume and replay use the bound version, never the latest YAML on disk.
+
+## 13.2 Delivery and Recovery Semantics
+
+V1 promises at-least-once worker execution, not exactly-once external side
+effects. Checkpoints preserve graph progress; side-effecting capabilities use a
+stable `action_id` as an idempotency key.
+
+Application rows, LangGraph checkpoints, and external services cannot share one
+atomic transaction. Every external write must therefore be idempotent or expose
+an explicit reconciliation path.
+
 ---
 
 # 14. Job Execution
@@ -511,6 +586,39 @@ Worker claims with SKIP LOCKED
   v
 LangGraph execution
 ```
+
+Jobs have a lease owner, heartbeat/lease expiry, attempt count, next-attempt
+time, and normalized last error. A stale job may be reclaimed only while its Run
+is non-terminal. Terminal Runs are immutable and cannot be claimed or resumed.
+
+```text
+runs        -> API-visible lifecycle
+jobs        -> scheduling and delivery attempts
+checkpoints -> durable graph position and interrupt state
+run_events  -> user-visible ordered timeline
+```
+
+## 14.1 Approval Continuation
+
+A sensitive action is frozen before interruption:
+
+```text
+PendingAction
+├── action_id
+├── run_id
+├── node_id
+├── tool_name
+├── canonical_arguments
+├── arguments_hash
+├── risk
+├── requested_at
+└── expires_at
+```
+
+Approval authorizes this immutable action, not a later model-generated action.
+Approve executes it once using `action_id`; reject or expiry returns a structured
+capability result to Supervisor. Resolution is idempotent and persisted before
+the Run is re-enqueued.
 
 Do not add Redis/RabbitMQ before a measured need.
 
@@ -540,6 +648,12 @@ run.failed
 ```
 
 SSE is a view over runtime events, not a separate execution mechanism.
+
+Lifecycle events are persisted in `run_events`. Sequences are monotonic per Run
+and allocated by persistence. A terminal event is unique per Run. SSE resumes
+with `Last-Event-ID` or `after_seq` and sends heartbeats while active.
+High-volume `llm.token` events may be batched or ephemeral; retention must be
+explicit.
 
 ---
 

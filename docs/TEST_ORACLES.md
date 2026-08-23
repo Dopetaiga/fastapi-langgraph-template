@@ -152,6 +152,9 @@ Partitions:
 - replay
 - terminal run
 - invalid resume
+- graph YAML changed after pause
+- duplicate worker delivery
+- stale job lease
 
 Oracle:
 
@@ -159,6 +162,9 @@ Oracle:
 - execution resumes from expected checkpoint
 - terminal run cannot resume
 - replay does not mutate original run history
+- resume uses the Run-bound graph version
+- duplicate delivery does not duplicate an external side effect
+- stale non-terminal job is reclaimable
 
 ---
 
@@ -171,6 +177,8 @@ Partitions:
 - duplicate response
 - expired/invalid approval
 - restart before response
+- tool arguments changed after approval request
+- duplicate approval response
 
 Oracle:
 
@@ -178,6 +186,8 @@ Oracle:
 - persisted approval exists
 - correct resume value
 - correct final state
+- approved canonical arguments are immutable
+- approved action id is consumed at most once
 
 ---
 
@@ -197,6 +207,25 @@ Oracle:
 - required event ordering
 - terminal event exactly once
 - sensitive fields redacted
+- terminal event uniqueness is enforced by persistence
+
+---
+
+## Model Gateway / Memory Boundary
+
+Partitions:
+
+- LiteLLM success, timeout, rate limit, malformed response
+- Mem0 search/add/update/delete success
+- Mem0 unavailable after the main Run completes
+- SDK-specific objects returned by adapters
+
+Oracle:
+
+- graph code sees only project-owned model request/result types
+- external failures use normalized error categories
+- Mem0 failure does not turn an already completed Run into failed
+- no LiteLLM or Mem0 SDK object enters AgentState, checkpoint, or public API
 
 ---
 

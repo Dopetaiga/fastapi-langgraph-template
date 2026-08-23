@@ -36,6 +36,8 @@ sensitive
 - registry validates arguments
 - Tool Node normalizes result/error
 - sensitive action routes through approval
+- approval freezes canonical arguments and an action id before interrupt
+- approved external writes must be idempotent or reconcilable
 - tool implementation does not decide agent control flow
 
 ## Required Tests

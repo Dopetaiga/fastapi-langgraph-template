@@ -4,15 +4,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.capabilities.approval import ApprovalStore, ApprovalStatus
+from app.capabilities.approval import ApprovalStatus
+from app.services.approval_repository import ApprovalRepository
 
 router = APIRouter(prefix="/approvals", tags=["approvals"])
 
-_approval_store = ApprovalStore()
+_approval_repository = ApprovalRepository()
 
 
-def get_store() -> ApprovalStore:
-    return _approval_store
+def get_repository() -> ApprovalRepository:
+    return _approval_repository
 
 
 class ApprovalResponse(BaseModel):
@@ -26,6 +27,11 @@ class ApprovalResponse(BaseModel):
     resolved_at: str | None = None
     resolved_by: str | None = None
     reason: str | None = None
+    action_id: str | None = None
+    tool_name: str | None = None
+    canonical_arguments: dict | None = None
+    arguments_hash: str | None = None
+    expires_at: str | None = None
 
 
 class ApproveRequest(BaseModel):
@@ -39,8 +45,11 @@ class RejectRequest(BaseModel):
 
 
 @router.get("/run/{run_id}", response_model=list[ApprovalResponse])
-async def list_approvals(run_id: str, store: ApprovalStore = Depends(get_store)):
-    approvals = store.pending_for_run(run_id)
+async def list_approvals(
+    run_id: str,
+    repository: ApprovalRepository = Depends(get_repository),
+):
+    approvals = await repository.list_for_run(run_id)
     return [_approval_to_response(a) for a in approvals]
 
 
@@ -48,9 +57,11 @@ async def list_approvals(run_id: str, store: ApprovalStore = Depends(get_store))
 async def approve(
     approval_id: str,
     req: ApproveRequest,
-    store: ApprovalStore = Depends(get_store),
+    repository: ApprovalRepository = Depends(get_repository),
 ):
-    resolved = store.resolve(approval_id, ApprovalStatus.approved, req.resolved_by, req.reason)
+    resolved = await repository.resolve_and_enqueue(
+        approval_id, ApprovalStatus.approved, req.resolved_by, req.reason
+    )
     if resolved is None:
         raise HTTPException(status_code=404, detail="approval not found")
     return _approval_to_response(resolved)
@@ -60,9 +71,11 @@ async def approve(
 async def reject(
     approval_id: str,
     req: RejectRequest,
-    store: ApprovalStore = Depends(get_store),
+    repository: ApprovalRepository = Depends(get_repository),
 ):
-    resolved = store.resolve(approval_id, ApprovalStatus.rejected, req.resolved_by, req.reason)
+    resolved = await repository.resolve_and_enqueue(
+        approval_id, ApprovalStatus.rejected, req.resolved_by, req.reason
+    )
     if resolved is None:
         raise HTTPException(status_code=404, detail="approval not found")
     return _approval_to_response(resolved)
@@ -80,4 +93,9 @@ def _approval_to_response(a) -> ApprovalResponse:
         resolved_at=a.resolved_at.isoformat() if a.resolved_at else None,
         resolved_by=a.resolved_by,
         reason=a.reason,
+        action_id=a.action_id,
+        tool_name=a.tool_name,
+        canonical_arguments=a.canonical_arguments,
+        arguments_hash=a.arguments_hash,
+        expires_at=a.expires_at.isoformat() if a.expires_at else None,
     )

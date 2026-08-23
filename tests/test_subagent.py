@@ -1,81 +1,101 @@
-"""Tests for subagent subsystem."""
 from __future__ import annotations
 
-import pytest
+from collections import deque
 
-from app.capabilities.subagent import (
-    PlannerReActExecutor,
-    ReActExecutor,
-    SubagentResult,
-    SubagentTask,
-)
+from app.capabilities.subagent import ReActExecutor, SubagentTask
+from app.models_gateway import ModelResult
+from app.tools.builtin.calculator import CALCULATOR_TOOL, calculator
+from app.tools.registry import ToolRegistry
 
 
-class TestSubagentTask:
-    def test_defaults(self):
-        t = SubagentTask(task="do something")
-        assert t.task == "do something"
-        assert t.allowed_tools == []
-        assert t.template == "react"
+class FakeGateway:
+    def __init__(self, *results: ModelResult) -> None:
+        self.results = deque(results)
+        self.requests = []
 
-    def test_custom_template(self):
-        t = SubagentTask(task="plan and execute", template="planner_react")
-        assert t.template == "planner_react"
-
-    def test_with_tools(self):
-        t = SubagentTask(task="search", allowed_tools=["web.search", "web.fetch"])
-        assert len(t.allowed_tools) == 2
+    async def complete(self, request):
+        self.requests.append(request)
+        return self.results.popleft()
 
 
-class TestReActExecutor:
-    def test_success(self):
-        ex = ReActExecutor()
-        result = ex.execute(SubagentTask(task="find data"))
-        assert result.status == "success"
-        assert "find data" in result.result["answer"]
-        assert result.metadata["template"] == "react"
-
-    def test_depth_guard_rejects(self):
-        ex = ReActExecutor()
-        ex.max_depth = 0
-        result = ex.execute(SubagentTask(task="test"), depth=1)
-        assert result.status == "error"
-        assert "depth" in result.error
-
-    def test_depth_zero_allowed(self):
-        ex = ReActExecutor()
-        ex.max_depth = 0
-        result = ex.execute(SubagentTask(task="top-level"), depth=0)
-        assert result.status == "success"
+def _registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(CALCULATOR_TOOL)
+    registry.register_callable("calculator", calculator)
+    return registry
 
 
-class TestPlannerReActExecutor:
-    def test_success(self):
-        ex = PlannerReActExecutor()
-        result = ex.execute(SubagentTask(task="analyze", template="planner_react"))
-        assert result.status == "success"
-        assert result.metadata["template"] == "planner_react"
+async def test_react_executes_allowlisted_tool_then_finishes():
+    gateway = FakeGateway(
+        ModelResult(structured={
+            "action": "tool",
+            "tool_name": "calculator",
+            "arguments": {"operation": "add", "a": 2, "b": 3},
+        }),
+        ModelResult(structured={"action": "final", "answer": "5"}),
+    )
+    executor = ReActExecutor(gateway, "test", _registry())
 
-    def test_depth_guard_rejects(self):
-        ex = PlannerReActExecutor()
-        ex.max_depth = 0
-        result = ex.execute(SubagentTask(task="test"), depth=1)
-        assert result.status == "error"
+    result = await executor.execute(SubagentTask(
+        task="calculate",
+        selected_context=["Only arithmetic is relevant"],
+        allowed_tools=["calculator"],
+    ))
+
+    assert result.status == "success"
+    assert result.result == {"answer": "5"}
+    assert result.metadata["steps"] == 2
+    assert gateway.requests[1].messages[-1]["role"] == "tool"
 
 
-class TestSubagentResult:
-    def test_success(self):
-        r = SubagentResult(status="success", result={"answer": "yes"})
-        assert r.status == "success"
-        assert r.result["answer"] == "yes"
-        assert r.error is None
+async def test_react_rejects_tool_outside_task_allowlist():
+    gateway = FakeGateway(ModelResult(structured={
+        "action": "tool",
+        "tool_name": "calculator",
+        "arguments": {},
+    }))
+    result = await ReActExecutor(gateway, "test", _registry()).execute(
+        SubagentTask(task="calculate", allowed_tools=[])
+    )
+    assert result.status == "error"
+    assert result.error == "tool not allowed: calculator"
 
-    def test_error(self):
-        r = SubagentResult(status="error", error="timeout")
-        assert r.error == "timeout"
 
-    def test_defaults(self):
-        r = SubagentResult(status="success")
-        assert r.result is None
-        assert r.error is None
-        assert r.metadata == {}
+async def test_subagent_rejects_recursive_depth_without_model_call():
+    gateway = FakeGateway()
+    result = await ReActExecutor(gateway, "test", _registry()).execute(
+        SubagentTask(task="nested"),
+        depth=1,
+    )
+    assert result.status == "error"
+    assert "depth" in result.error
+    assert gateway.requests == []
+
+
+async def test_planner_react_runs_plan_before_decision_loop():
+    gateway = FakeGateway(
+        ModelResult(content="Use no tools and answer."),
+        ModelResult(structured={"action": "final", "answer": "done"}),
+    )
+    result = await ReActExecutor(gateway, "test", _registry()).execute(SubagentTask(
+        task="analyze",
+        template="planner_react",
+    ))
+    assert result.status == "success"
+    assert len(gateway.requests) == 2
+    assert gateway.requests[0].metadata["subagent.phase"] == "plan"
+
+
+async def test_react_stops_at_max_steps():
+    gateway = FakeGateway(*[
+        ModelResult(structured={
+            "action": "tool",
+            "tool_name": "calculator",
+            "arguments": {"operation": "add", "a": 1, "b": 1},
+        }) for _ in range(2)
+    ])
+    result = await ReActExecutor(gateway, "test", _registry(), max_steps=2).execute(
+        SubagentTask(task="loop", allowed_tools=["calculator"])
+    )
+    assert result.status == "timeout"
+    assert result.metadata["steps"] == 2

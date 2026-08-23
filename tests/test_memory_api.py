@@ -1,68 +1,60 @@
-"""Tests for memory API endpoints (Phase 9)."""
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 
+from app.api.memory import get_memory_store
+from app.capabilities.memory_store import MemoryRecord
 from app.main import create_app
 
 
-@pytest.fixture()
-def client():
-    return TestClient(create_app())
+class FakeMemoryStore:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def add(self, **kwargs):
+        self.calls.append(("add", kwargs))
+        return [MemoryRecord(id="m1", text="likes tea")]
+
+    async def search(self, **kwargs):
+        self.calls.append(("search", kwargs))
+        return [MemoryRecord(id="m1", text="likes tea", score=0.9)]
+
+    async def list(self, **kwargs):
+        self.calls.append(("list", kwargs))
+        return [MemoryRecord(id="m1", text="likes tea")]
 
 
-class TestMemoryAPI:
-    def test_put_and_get_user_memory(self, client: TestClient):
-        resp = client.post("/memory/user", json={
-            "user_id": "u1",
-            "key": "lang",
-            "value": {"lang": "python"},
-        })
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["key"] == "lang"
-        assert body["value"]["lang"] == "python"
+def _client(store: FakeMemoryStore) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_memory_store] = lambda: store
+    return TestClient(app)
 
-    def test_get_user_memory(self, client: TestClient):
-        client.post("/memory/user", json={"user_id": "u2", "key": "pref", "value": {"theme": "dark"}})
-        resp = client.get("/memory/user/u2")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data) == 1
-        assert data[0]["key"] == "pref"
 
-    def test_get_user_memory_key(self, client: TestClient):
-        client.post("/memory/user", json={"user_id": "u3", "key": "color", "value": {"color": "blue"}})
-        resp = client.get("/memory/user/u3/color")
-        assert resp.status_code == 200
-        assert resp.json()["value"]["color"] == "blue"
+def test_add_memory_uses_async_store_boundary():
+    store = FakeMemoryStore()
+    response = _client(store).post("/memory/u1", json={
+        "messages": [{"role": "user", "content": "I like tea"}],
+        "metadata": {"source": "chat"},
+    })
+    assert response.status_code == 200
+    assert response.json()["memories"][0]["text"] == "likes tea"
+    assert store.calls[0][1]["user_id"] == "u1"
 
-    def test_get_missing_key_404(self, client: TestClient):
-        resp = client.get("/memory/user/nobody/missing")
-        assert resp.status_code == 404
 
-    def test_put_team_memory(self, client: TestClient):
-        resp = client.post("/memory/team", json={
-            "team_id": "team-1",
-            "key": "goal",
-            "value": {"goal": "launch"},
-        })
-        assert resp.status_code == 200
-        assert resp.json()["namespace"] == "team"
+def test_search_memory_is_user_scoped():
+    store = FakeMemoryStore()
+    response = _client(store).post("/memory/u2/search", json={"query": "drink", "top_k": 3})
+    assert response.status_code == 200
+    assert store.calls == [("search", {"user_id": "u2", "query": "drink", "top_k": 3})]
 
-    def test_get_team_memory(self, client: TestClient):
-        client.post("/memory/team", json={"team_id": "team-2", "key": "k1", "value": {"v": 1}})
-        resp = client.get("/memory/team/team-2")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data) == 1
-        assert data[0]["key"] == "k1"
 
-    def test_user_isolation(self, client: TestClient):
-        client.post("/memory/user", json={"user_id": "uA", "key": "secret", "value": {"s": "A"}})
-        client.post("/memory/user", json={"user_id": "uB", "key": "secret", "value": {"s": "B"}})
-        resp_a = client.get("/memory/user/uA/secret")
-        resp_b = client.get("/memory/user/uB/secret")
-        assert resp_a.json()["value"]["s"] == "A"
-        assert resp_b.json()["value"]["s"] == "B"
+def test_list_memory_passes_pagination():
+    store = FakeMemoryStore()
+    response = _client(store).get("/memory/u3?page=2&page_size=10")
+    assert response.status_code == 200
+    assert store.calls == [("list", {"user_id": "u3", "page": 2, "page_size": 10})]
+
+
+def test_add_rejects_empty_messages():
+    response = _client(FakeMemoryStore()).post("/memory/u1", json={"messages": []})
+    assert response.status_code == 422

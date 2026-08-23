@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from app.core.state import RunStatus
 from app.runtime.worker import WorkerQueue
 
 
@@ -16,6 +17,14 @@ def _make_queue():
     return WorkerQueue(handler=handler), calls
 
 
+class FakeEventRepository:
+    def __init__(self):
+        self.events = []
+
+    async def append_many(self, _run_id, events):
+        self.events.extend(events)
+
+
 class TestWorkerQueueInterface:
     def test_handler_receives_job(self):
         """run_once passes claimed job to handler."""
@@ -23,6 +32,8 @@ class TestWorkerQueueInterface:
         fake_job = MagicMock()
         fake_job.id = "job-1"
         fake_job.run_id = "run-1"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
 
         async def run():
             with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
@@ -50,10 +61,14 @@ class TestWorkerQueueInterface:
 
     def test_run_once_handles_error(self):
         """run_once fails job when handler raises."""
-        queue, calls = _make_queue()
+        events = FakeEventRepository()
+        queue, _ = _make_queue()
+        queue._event_repository = events
         fake_job = MagicMock()
         fake_job.id = "job-err"
         fake_job.run_id = "run-err"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
 
         def bad_handler(job):
             raise RuntimeError("boom")
@@ -69,6 +84,29 @@ class TestWorkerQueueInterface:
                         mock_fail.assert_called_once()
 
         asyncio.run(run())
+        assert events.events == []
+
+    def test_run_once_awaits_async_handler(self):
+        handled = []
+
+        async def handler(job):
+            handled.append(job.id)
+
+        queue = WorkerQueue(handler=handler)
+        fake_job = MagicMock(id="job-async", run_id="run-async")
+        fake_job.id = "job-async"
+        fake_job.run_id = "run-async"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "complete", AsyncMock()):
+                    with patch.object(queue, "_set_run_status", AsyncMock()):
+                        assert await queue.run_once() is True
+
+        asyncio.run(run())
+        assert handled == ["job-async"]
 
     def test_run_forever_stops_on_cancel(self):
         """run_forever exits on CancelledError."""
@@ -81,5 +119,63 @@ class TestWorkerQueueInterface:
                     await asyncio.sleep(0.02)
                     task.cancel()
                     await task
+
+        asyncio.run(run())
+
+    def test_exhausted_retry_emits_single_terminal_failure(self):
+        events = FakeEventRepository()
+
+        def handler(_job):
+            raise RuntimeError("final boom")
+
+        queue = WorkerQueue(handler=handler, event_repository=events)
+        fake_job = MagicMock(id="job-final", run_id="run-final")
+        fake_job.id = "job-final"
+        fake_job.run_id = "run-final"
+        fake_job.attempt_count = 3
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "fail", AsyncMock()):
+                    with patch.object(queue, "_set_run_status", AsyncMock()):
+                        await queue.run_once()
+
+        asyncio.run(run())
+        assert len(events.events) == 1
+        assert events.events[0].type.value == "run.failed"
+
+    def test_paused_handler_result_is_not_overwritten_completed(self):
+        async def handler(_job):
+            return RunStatus.paused
+
+        queue = WorkerQueue(handler=handler)
+        fake_job = MagicMock(id="job-paused", run_id="run-paused")
+        fake_job.id = "job-paused"
+        fake_job.run_id = "run-paused"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "complete", AsyncMock()):
+                    with patch.object(queue, "_set_run_status", AsyncMock()) as set_status:
+                        await queue.run_once()
+                        set_status.assert_awaited_once_with("run-paused", RunStatus.running)
+
+        asyncio.run(run())
+
+    def test_heartbeat_loop_renews_until_stopped(self):
+        queue, _ = _make_queue()
+        queue.lease_seconds = 0.03
+
+        async def run():
+            stop = asyncio.Event()
+            with patch.object(queue, "heartbeat", AsyncMock(return_value=True)) as heartbeat:
+                task = asyncio.create_task(queue._heartbeat_loop("job-1", stop))
+                await asyncio.sleep(1.05)
+                stop.set()
+                await task
+                heartbeat.assert_awaited()
 
         asyncio.run(run())

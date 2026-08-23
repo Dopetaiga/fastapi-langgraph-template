@@ -1,11 +1,8 @@
 """Tests for RAG subsystem (capabilities/rag.py)."""
 from __future__ import annotations
 
-import pytest
-
-from app.capabilities.rag import Chunk, Document, KnowledgeBase, RAGScope, Retriever
+from app.capabilities.rag import Chunk, KnowledgeBase, RAGScope, Retriever
 from app.core.state import ErrorCategory
-from app.tools.result import ToolResult
 
 
 class TestRAGScope:

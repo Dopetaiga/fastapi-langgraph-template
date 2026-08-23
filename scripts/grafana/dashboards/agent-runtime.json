@@ -1,0 +1,9 @@
+{
+  "annotations":{"list":[]},"editable":true,"panels":[
+    {"type":"timeseries","title":"Operation rate","datasource":{"uid":"prometheus","type":"prometheus"},"targets":[{"expr":"sum by (operation, status) (rate(agent_runtime_operation_count_total[5m]))","legendFormat":"{{operation}} {{status}}"}],"gridPos":{"h":8,"w":12,"x":0,"y":0}},
+    {"type":"timeseries","title":"P95 operation latency","datasource":{"uid":"prometheus","type":"prometheus"},"targets":[{"expr":"histogram_quantile(0.95, sum by (le, operation) (rate(agent_runtime_operation_duration_seconds_bucket[5m])))","legendFormat":"{{operation}}"}],"gridPos":{"h":8,"w":12,"x":12,"y":0}},
+    {"type":"timeseries","title":"LLM tokens","datasource":{"uid":"prometheus","type":"prometheus"},"targets":[{"expr":"sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_total[5m]))","legendFormat":"{{gen_ai_request_model}} {{gen_ai_token_type}}"}],"gridPos":{"h":8,"w":12,"x":0,"y":8}},
+    {"type":"timeseries","title":"Worker outcomes","datasource":{"uid":"prometheus","type":"prometheus"},"targets":[{"expr":"sum by (status) (increase(agent_runtime_worker_jobs_total[15m]))","legendFormat":"{{status}}"}],"gridPos":{"h":8,"w":12,"x":12,"y":8}},
+    {"type":"logs","title":"Correlated application logs","datasource":{"uid":"loki","type":"loki"},"targets":[{"expr":"{service_name=\"agent-runtime\"}"}],"gridPos":{"h":10,"w":24,"x":0,"y":16}}
+  ],"schemaVersion":41,"tags":["agent-runtime","otel"],"templating":{"list":[]},"time":{"from":"now-6h","to":"now"},"title":"Agent Runtime Overview","uid":"agent-runtime-overview","version":1
+}

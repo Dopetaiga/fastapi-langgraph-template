@@ -24,6 +24,10 @@ PostgreSQL + pgvector
 - team shared memory
 - cross-session retrieval
 
+V1 uses Mem0. `MemoryStore` and `Mem0MemoryStore` map project-owned requests/results, normalize
+errors, propagates traces, and prevents Mem0 SDK types from leaking into graph
+state. It is not a dynamic memory-provider framework.
+
 Memory does not own:
 
 - RAG documents
@@ -51,6 +55,9 @@ conversation/outcome -> personal memory update
 ```
 
 Team memory updates are explicit.
+
+Personal extraction is best effort after a successful Run. Stored items retain
+source-run provenance. Secrets and untrusted tool instructions are rejected.
 
 ## Required Tests
 

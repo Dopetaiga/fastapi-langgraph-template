@@ -1,10 +1,16 @@
 """SQLAlchemy ORM models for application tables."""
-from datetime import datetime, timezone
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    Boolean, Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 
 from app.db.engine import Base
@@ -26,6 +32,9 @@ class RunModel(Base):
     session_id = Column(String, ForeignKey("sessions.id"), index=True)
     status = Column(Enum("queued", "running", "paused", "completed", "failed", "cancelled", name="run_status"), index=True)
     graph_name = Column(String)
+    graph_version = Column(String, nullable=False, default="1")
+    graph_definition_hash = Column(String, nullable=True)
+    graph_snapshot = Column(JSONB, nullable=True)
     input_text = Column(Text)
     output_text = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
@@ -40,10 +49,17 @@ class JobModel(Base):
 
     id = Column(String, primary_key=True)
     run_id = Column(String, ForeignKey("runs.id"), index=True)
-    status = Column(Enum("queued", "running", "completed", "failed", name="job_status"), index=True)
+    status = Column(Enum("queued", "running", "retry_wait", "completed", "failed", name="job_status"), index=True)
+    lease_owner = Column(String, nullable=True, index=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True, index=True)
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     error = Column(Text, nullable=True)
+    trace_context = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -98,7 +114,7 @@ class KnowledgeChunkModel(Base):
     document_id = Column(String, ForeignKey("documents.id"), index=True)
     knowledge_base_id = Column(String, ForeignKey("knowledge_bases.id"), index=True)
     content = Column(Text)
-    embedding = Column(ARRAY(Float), nullable=True)  # pgvector column
+    embedding = Column(Vector(1536), nullable=True)
     metadata_ = Column("metadata", JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -110,40 +126,14 @@ class ApprovalModel(Base):
     run_id = Column(String, ForeignKey("runs.id"), index=True)
     node_id = Column(String)
     action = Column(String)
+    action_id = Column(String, unique=True, nullable=True)
+    tool_name = Column(String, nullable=True)
+    canonical_arguments = Column(JSONB, nullable=True)
+    arguments_hash = Column(String, nullable=True)
     status = Column(Enum("pending", "approved", "rejected", "expired", name="approval_status"), default="pending", index=True)
     details = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     resolved_by = Column(String, nullable=True)
     reason = Column(Text, nullable=True)
-
-
-class UserMemoryModel(Base):
-    __tablename__ = "user_memory"
-
-    id = Column(String, primary_key=True)
-    user_id = Column(String, index=True)
-    key = Column(String)
-    value = Column(JSONB)
-    namespace = Column(String, default="user")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    __table_args__ = (
-        UniqueConstraint("user_id", "key", "namespace", name="uq_user_memory_key"),
-    )
-
-
-class TeamMemoryModel(Base):
-    __tablename__ = "team_memory"
-
-    id = Column(String, primary_key=True)
-    team_id = Column(String, index=True)
-    key = Column(String)
-    value = Column(JSONB)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    __table_args__ = (
-        UniqueConstraint("team_id", "key", name="uq_team_memory_key"),
-    )
+    expires_at = Column(DateTime(timezone=True), nullable=True)

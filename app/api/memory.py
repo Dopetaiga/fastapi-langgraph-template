@@ -1,77 +1,82 @@
-"""Memory API endpoints."""
+"""Long-term memory API backed by the project-owned Mem0 adapter."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.capabilities.memory import MemoryService, MemoryFact
+from app.capabilities.memory_store import Mem0MemoryStore, MemoryRecord, MemoryStore
+from app.core.config import settings
 
 router = APIRouter(prefix="/memory", tags=["memory"])
-
-_memory = MemoryService()
-
-
-def get_memory() -> MemoryService:
-    return _memory
+_memory_store: MemoryStore | None = None
 
 
-class MemoryPutRequest(BaseModel):
-    user_id: str
-    key: str
-    value: dict
-    namespace: str = "user"
-    team_id: str | None = None
+def get_memory_store() -> MemoryStore:
+    global _memory_store
+    if not settings.mem0_enabled or not settings.mem0_api_key:
+        raise HTTPException(status_code=503, detail="Mem0 is not configured")
+    if _memory_store is None:
+        _memory_store = Mem0MemoryStore.create(
+            api_key=settings.mem0_api_key,
+            data_dir=settings.mem0_data_dir,
+        )
+    return _memory_store
 
 
-class MemoryGetResponse(BaseModel):
-    user_id: str
-    key: str
-    value: dict
-    namespace: str
-    team_id: str | None = None
+class MemoryAddRequest(BaseModel):
+    messages: list[dict[str, str]]
+    metadata: dict = Field(default_factory=dict)
 
 
-class TeamMemoryPutRequest(BaseModel):
-    team_id: str
-    key: str
-    value: dict
+class MemorySearchRequest(BaseModel):
+    query: str
+    top_k: int = Field(default=5, ge=1, le=50)
 
 
-@router.post("/user", response_model=MemoryGetResponse)
-async def put_user_memory(req: MemoryPutRequest, memory: MemoryService = Depends(get_memory)):
-    fact = MemoryFact(user_id=req.user_id, key=req.key, value=req.value, namespace=req.namespace, team_id=req.team_id)
-    memory.put(fact)
-    return MemoryGetResponse(user_id=req.user_id, key=req.key, value=req.value, namespace=req.namespace, team_id=req.team_id)
+class MemoryResponse(BaseModel):
+    memories: list[MemoryRecord]
 
 
-@router.get("/user/{user_id}", response_model=list[MemoryGetResponse])
-async def get_user_memory(user_id: str, memory: MemoryService = Depends(get_memory)):
-    facts = memory.get_all(user_id)
-    return [
-        MemoryGetResponse(user_id=f.user_id, key=f.key, value=f.value, namespace=f.namespace, team_id=f.team_id)
-        for f in facts
-    ]
+@router.post("/{user_id}", response_model=MemoryResponse)
+async def add_memory(
+    user_id: str,
+    request: MemoryAddRequest,
+    store: MemoryStore = Depends(get_memory_store),
+) -> MemoryResponse:
+    if not request.messages:
+        raise HTTPException(status_code=422, detail="messages must not be empty")
+    records = await store.add(
+        user_id=user_id,
+        messages=request.messages,
+        metadata=request.metadata,
+    )
+    return MemoryResponse(memories=records)
 
 
-@router.get("/user/{user_id}/{key}", response_model=MemoryGetResponse)
-async def get_user_memory_key(user_id: str, key: str, memory: MemoryService = Depends(get_memory)):
-    fact = memory.get(user_id, key)
-    if fact is None:
-        raise HTTPException(status_code=404, detail="memory key not found")
-    return MemoryGetResponse(user_id=fact.user_id, key=fact.key, value=fact.value, namespace=fact.namespace, team_id=fact.team_id)
+@router.post("/{user_id}/search", response_model=MemoryResponse)
+async def search_memory(
+    user_id: str,
+    request: MemorySearchRequest,
+    store: MemoryStore = Depends(get_memory_store),
+) -> MemoryResponse:
+    return MemoryResponse(memories=await store.search(
+        user_id=user_id,
+        query=request.query,
+        top_k=request.top_k,
+    ))
 
 
-@router.post("/team", response_model=MemoryGetResponse)
-async def put_team_memory(req: TeamMemoryPutRequest, memory: MemoryService = Depends(get_memory)):
-    fact = MemoryFact(user_id=req.team_id, key=req.key, value=req.value, namespace="team", team_id=req.team_id)
-    memory.put(fact)
-    return MemoryGetResponse(user_id=req.team_id, key=req.key, value=req.value, namespace="team", team_id=req.team_id)
-
-
-@router.get("/team/{team_id}", response_model=list[MemoryGetResponse])
-async def get_team_memory(team_id: str, memory: MemoryService = Depends(get_memory)):
-    facts = memory.get_all(team_id, namespace="team", team_id=team_id)
-    return [
-        MemoryGetResponse(user_id=f.user_id, key=f.key, value=f.value, namespace=f.namespace, team_id=f.team_id)
-        for f in facts
-    ]
+@router.get("/{user_id}", response_model=MemoryResponse)
+async def list_memory(
+    user_id: str,
+    page: int = 1,
+    page_size: int = 50,
+    store: MemoryStore = Depends(get_memory_store),
+) -> MemoryResponse:
+    if page < 1 or not 1 <= page_size <= 100:
+        raise HTTPException(status_code=422, detail="invalid pagination")
+    return MemoryResponse(memories=await store.list(
+        user_id=user_id,
+        page=page,
+        page_size=page_size,
+    ))

@@ -1,6 +1,7 @@
 """Runtime event emitter: in-memory queue of RuntimeEvent instances."""
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 
 from app.core.state import EventType, RuntimeEvent
@@ -43,3 +44,33 @@ class EventEmitter:
     def clear(self) -> None:
         self._events.clear()
         self._seq = 0
+
+
+class DurableEventEmitter(EventEmitter):
+    """Persist each emitted event promptly while preserving local test visibility."""
+
+    def __init__(self, repository) -> None:
+        super().__init__()
+        self._repository = repository
+        self._lock = asyncio.Lock()
+        self._tasks: list[asyncio.Task] = []
+
+    def emit(
+        self,
+        type_: EventType,
+        run_id: str,
+        node: str | None = None,
+        payload: dict | None = None,
+    ) -> RuntimeEvent:
+        event = super().emit(type_, run_id, node, payload)
+        self._tasks.append(asyncio.create_task(self._persist(run_id, event)))
+        return event
+
+    async def _persist(self, run_id: str, event: RuntimeEvent) -> None:
+        async with self._lock:
+            await self._repository.append_many(run_id, [event])
+
+    async def drain(self) -> None:
+        if self._tasks:
+            await asyncio.gather(*self._tasks)
+            self._tasks.clear()

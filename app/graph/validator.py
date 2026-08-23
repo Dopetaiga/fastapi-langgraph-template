@@ -11,7 +11,7 @@ Validates:
 from __future__ import annotations
 
 from app.core.state import NodeType
-from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
+from app.graph.schemas import AgentDefinition
 from app.services.errors import GraphValidationError
 
 

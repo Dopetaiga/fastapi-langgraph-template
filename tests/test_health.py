@@ -1,8 +1,9 @@
 """Tests for health and model smoke-test endpoints."""
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
+
+from app.models_gateway import ModelResult
 
 
 def test_health_returns_200(client: TestClient):
@@ -19,11 +20,11 @@ def test_health_schema(client: TestClient):
     assert body.keys() == {"status", "app"}
 
 
-def test_model_smoke_test_mocked(client: TestClient, mock_litellm_response):
-    import app.main as app_module
-    import litellm
-
-    with patch.object(litellm, "completion", return_value=mock_litellm_response) as mock_comp:
+def test_model_smoke_test_mocked(client: TestClient):
+    with patch(
+        "app.api.health.LiteLLMModelGateway.complete",
+        new=AsyncMock(return_value=ModelResult(content="Hello!", model="gpt-4o-mini")),
+    ) as mock_complete:
         resp = client.post("/model/smoke-test", json={"prompt": "Say hi"})
 
     assert resp.status_code == 200
@@ -33,17 +34,18 @@ def test_model_smoke_test_mocked(client: TestClient, mock_litellm_response):
     assert isinstance(body["latency_ms"], float)
     assert body["latency_ms"] >= 0
 
-    assert mock_comp.called
+    assert mock_complete.called
 
 
-def test_model_smoke_test_default_prompt(client: TestClient, mock_litellm_response):
-    import litellm
-
-    with patch.object(litellm, "completion", return_value=mock_litellm_response) as mock_comp:
+def test_model_smoke_test_default_prompt(client: TestClient):
+    with patch(
+        "app.api.health.LiteLLMModelGateway.complete",
+        new=AsyncMock(return_value=ModelResult(content="Hello!", model="gpt-4o-mini")),
+    ) as mock_complete:
         resp = client.post("/model/smoke-test", json={})
 
     assert resp.status_code == 200
-    mock_comp.assert_called_once()
-    call_args = mock_comp.call_args
-    assert call_args.kwargs["model"] == "gpt-4o-mini"
-    assert len(call_args.kwargs["messages"]) == 1
+    mock_complete.assert_awaited_once()
+    request = mock_complete.await_args.args[0]
+    assert request.model == "gpt-4o-mini"
+    assert len(request.messages) == 1

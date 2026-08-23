@@ -1,10 +1,12 @@
 """ToolRegistry: central registry of concrete tools."""
 from __future__ import annotations
 
-from typing import Any, Callable
+import inspect
+from collections.abc import Callable
 
+from app.core.state import ErrorCategory
 from app.services.errors import ToolNotFoundError, ToolPermissionError
-from app.tools.metadata import ToolDef, ToolRisk, ToolSource
+from app.tools.metadata import ToolDef
 from app.tools.result import ToolResult
 from app.tools.scope import ToolScope
 
@@ -38,7 +40,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def invoke(self, name: str, arguments: dict) -> ToolResult:
-        tool = self.get(name)
+        self.get(name)
 
         # scope check
         if not self._scope.is_allowed(name):
@@ -57,4 +59,22 @@ class ToolRegistry:
         except Exception as exc:
             return ToolResult.fail(ErrorCategory.tool_error, str(exc))
 
+        return ToolResult.ok(data={"result": data})
+
+    async def ainvoke(self, name: str, arguments: dict) -> ToolResult:
+        """Invoke sync or async concrete tools through one normalized boundary."""
+        self.get(name)
+        if not self._scope.is_allowed(name):
+            raise ToolPermissionError(f"tool '{name}' is not allowed by current scope")
+        func = self._callables.get(name)
+        if func is None:
+            return ToolResult.fail(ErrorCategory.tool_error, f"no callable bound for tool '{name}'")
+        try:
+            data = func(**arguments)
+            if inspect.isawaitable(data):
+                data = await data
+        except TypeError as exc:
+            return ToolResult.fail(ErrorCategory.validation_error, str(exc))
+        except Exception as exc:
+            return ToolResult.fail(ErrorCategory.tool_error, str(exc))
         return ToolResult.ok(data={"result": data})

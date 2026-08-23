@@ -4,7 +4,6 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from app.core.state import ErrorCategory, NormalizedError
-from app.services.errors import ToolPermissionError
 
 
 class ToolResult(BaseModel):

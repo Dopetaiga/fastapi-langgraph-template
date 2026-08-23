@@ -1,64 +1,78 @@
-"""SSE streaming endpoint for run events."""
+"""Durable Server-Sent Events endpoint backed by PostgreSQL."""
 from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.state import EventType
-from app.services.events import EventEmitter
+from app.observability.telemetry import sse_connections, sse_events
+from app.services.event_repository import RuntimeEventRepository
 
 router = APIRouter(prefix="/runs", tags=["streaming"])
-
-# In-memory event store: run_id -> EventEmitter
-_run_emitters: dict[str, EventEmitter] = {}
+_event_repository = RuntimeEventRepository()
 
 
-def get_emitter(run_id: str) -> EventEmitter:
-    if run_id not in _run_emitters:
-        _run_emitters[run_id] = EventEmitter()
-    return _run_emitters[run_id]
-
-
-def register_emitter(run_id: str, emitter: EventEmitter) -> None:
-    _run_emitters[run_id] = emitter
+def get_event_repository() -> RuntimeEventRepository:
+    return _event_repository
 
 
 @router.get("/{run_id}/stream")
-async def stream_run_events(run_id: str, request: Request, after_seq: int = -1):
-    """SSE endpoint streaming run events."""
-    emitter = get_emitter(run_id)
+async def stream_run_events(
+    run_id: str,
+    request: Request,
+    after_seq: int = -1,
+    repository: RuntimeEventRepository = Depends(get_event_repository),
+) -> StreamingResponse:
+    """Replay durable events, then tail until terminal state or disconnect."""
+    if not await repository.run_exists(run_id):
+        raise HTTPException(status_code=404, detail="run not found")
+    header_id = request.headers.get("last-event-id")
+    cursor = int(header_id) if header_id is not None else after_seq
 
-    async def event_generator():
-        terminal_types = {EventType.run_completed, EventType.run_failed}
-        sent: set[int] = set()
-        max_iterations = 100
-        for _ in range(max_iterations):
-            pending = [e for e in emitter.all_events() if e.seq > after_seq and e.seq not in sent]
-            if not pending:
-                return
-            for event in pending:
-                sent.add(event.seq)
-                yield _sse_event(event.type.value, event.payload, event.seq)
-                if event.type in terminal_types:
+    async def event_generator() -> AsyncIterator[str]:
+        nonlocal cursor
+        sse_connections.add(1)
+        terminal_types = {"run.completed", "run.failed", "run.cancelled"}
+        idle_polls = 0
+        try:
+            while not await request.is_disconnected():
+                pending = await repository.list_after(run_id, cursor)
+                if pending:
+                    idle_polls = 0
+                    for event in pending:
+                        cursor = event.seq
+                        sse_events.add(1, {"event.type": event.type})
+                        yield _sse_event(event.type, event.payload, event.seq, event.node)
+                        if event.type in terminal_types:
+                            return
+                    continue
+                if await repository.run_is_terminal_or_paused(run_id):
                     return
-            await asyncio.sleep(0.02)
+                idle_polls += 1
+                if idle_polls % 15 == 0:
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(1.0)
+        finally:
+            sse_connections.add(-1)
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
-def _sse_event(event_type: str, payload: dict, seq: int) -> str:
-    data = {"type": event_type, "seq": seq, "payload": _redact(payload)}
-    return f"data: {json.dumps(data)}\n\n"
-
-
-def _redact(payload: dict) -> dict:
-    """Redact sensitive fields from events."""
-    sensitive = {"api_key", "password", "secret", "token"}
-    return {k: ("***" if k.lower() in sensitive else v) for k, v in payload.items()}
+def _sse_event(event_type: str, payload: dict, seq: int, node: str | None = None) -> str:
+    data = {"type": event_type, "seq": seq, "node": node, "payload": payload}
+    return (
+        f"id: {seq}\n"
+        f"event: {event_type}\n"
+        f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
+    )

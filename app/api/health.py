@@ -1,11 +1,11 @@
 """Health and model smoke-test endpoints."""
 import time
 
-import litellm
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.models_gateway import LiteLLMModelGateway, ModelRequest
 
 router = APIRouter(prefix="", tags=["health"])
 
@@ -32,18 +32,23 @@ async def health() -> HealthResponse:
 
 @router.post("/model/smoke-test", response_model=SmokeTestResponse)
 async def model_smoke_test(req: SmokeTestRequest) -> SmokeTestResponse:
-    litellm.api_key = settings.litellm_api_key
-    litellm.api_base = settings.litellm_api_base
-
+    gateway = LiteLLMModelGateway(
+        api_base=settings.litellm_api_base,
+        api_key=settings.litellm_api_key,
+        default_model=settings.model_name,
+    )
     start = time.perf_counter()
-    result = litellm.completion(
+    result = await gateway.complete(ModelRequest(
         model=settings.model_name,
         messages=[{"role": "user", "content": req.prompt}],
-    )
+    ))
     elapsed_ms = (time.perf_counter() - start) * 1000
 
+    if not result.success:
+        raise HTTPException(status_code=502, detail=result.error.model_dump() if result.error else "model call failed")
+
     return SmokeTestResponse(
-        model=settings.model_name,
-        response=result.choices[0].message.content or "",
+        model=result.model or settings.model_name,
+        response=result.content,
         latency_ms=round(elapsed_ms, 2),
     )

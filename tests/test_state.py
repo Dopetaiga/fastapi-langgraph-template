@@ -65,7 +65,7 @@ class TestSupervisorDecision:
         assert d.final_response == "done"
 
     def test_all_actions(self):
-        for action in ["tool", "rag", "subagent", "approval", "node", "final"]:
+        for action in ["tool", "rag", "subagent", "approval", "final"]:
             d = SupervisorDecision(action=action)
             assert d.action == action
 

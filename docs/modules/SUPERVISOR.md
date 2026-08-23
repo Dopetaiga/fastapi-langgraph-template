@@ -18,12 +18,24 @@ A projected view of:
 
 Structured SupervisorDecision.
 
+```text
+action
+capability_node_id
+resource
+input
+final_response
+```
+
+`capability_node_id` must exist and match `action`. A concrete tool,
+knowledge-base, or subagent resource must pass that node's configured scope.
+
 ## Rules
 
 - never execute a tool directly
 - never query RAG directly
 - never invoke a subagent directly
 - choose only allowed graph targets/resources
+- never jump to an arbitrary ordinary node
 - may produce final answer
 - malformed output must become a recoverable normalized error when possible
 

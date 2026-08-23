@@ -1,8 +1,5 @@
 """Tests for application configuration."""
-import os
 
-import pytest
-from pydantic_settings import SettingsConfigDict
 
 from app.core.config import Settings
 

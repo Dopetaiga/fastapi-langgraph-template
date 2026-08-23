@@ -1,26 +1,38 @@
-"""Tests for observability/telemetry (Phase 11)."""
+"""Deterministic OpenTelemetry tests."""
 from __future__ import annotations
 
-import pytest
+from unittest.mock import patch
+
+from fastapi import FastAPI
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from app.observability.telemetry import instrument_fastapi, setup_telemetry, traced_span
 
 
-class TestTelemetrySetup:
-    def test_setup_no_crash_without_packages(self):
-        """setup_telemetry should not crash even if opentelemetry is not installed."""
-        from app.observability.telemetry import setup_telemetry
-        setup_telemetry()  # should be a no-op
+def test_disabled_setup_is_explicit() -> None:
+    assert setup_telemetry(enabled=False) is None
 
-    def test_get_tracer_returns_noop(self):
-        """get_tracer returns a no-op tracer when packages are missing."""
-        from app.observability.telemetry import get_tracer
-        tracer = get_tracer()
-        span = tracer.start_as_current_span("test")
-        with span:
-            pass  # no-op
 
-    def test_instrument_fastapi_no_crash(self):
-        """instrument_fastapi should not crash without packages."""
-        from app.observability.telemetry import instrument_fastapi
-        from fastapi import FastAPI
-        app = FastAPI()
-        instrument_fastapi(app)  # no-op
+def test_traced_span_records_attributes_and_error() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+
+    with patch("app.observability.telemetry.get_tracer", return_value=tracer):
+        with traced_span("agent.run", {"agent.run_id": "run-1", "secret": {"bad": "shape"}}):
+            pass
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["agent.run"]
+    assert spans[0].attributes["agent.run_id"] == "run-1"
+    assert "secret" not in spans[0].attributes
+
+
+def test_fastapi_instrumentation_is_idempotent() -> None:
+    app = FastAPI()
+    instrument_fastapi(app)
+    instrument_fastapi(app)
+    assert app.state.otel_instrumented is True

@@ -71,6 +71,8 @@ START -> LLM -> END
 - define minimal AgentState
 - create one LLM node
 - invoke LiteLLM
+- add a thin project-owned ModelGateway implemented only by LiteLLM
+- add basic agent.run and llm.call spans
 - expose `POST /runs` synchronously for now
 
 ## Acceptance
@@ -124,6 +126,7 @@ Implement main agent loop.
 - final termination
 - max_steps
 - recoverable capability error return
+- validate capability node identity separately from resource scope
 
 Use fake capability nodes first.
 
@@ -231,6 +234,9 @@ Move from demo execution to durable runtime.
 - resume
 - replay
 - crash recovery
+- immutable graph version binding
+- worker lease, heartbeat, retry, and stale-job recovery
+- at-least-once delivery and action idempotency semantics
 
 ## Acceptance
 
@@ -268,8 +274,8 @@ Add cross-session personal/team memory.
 
 ## Tasks
 
-- select one memory backend
-- thin MemoryService
+- use Mem0 as the fixed memory backend
+- add a thin MemoryStore that keeps Mem0 types out of runtime contracts
 - user namespace
 - team namespace
 - before-run retrieval
@@ -279,6 +285,9 @@ Add cross-session personal/team memory.
 ## Acceptance
 
 A new session can retrieve relevant personal memory learned previously.
+
+Mem0 can be replaced by a fake at the `MemoryStore` boundary in tests. V1 does
+not implement runtime backend selection or a memory provider registry.
 
 ---
 

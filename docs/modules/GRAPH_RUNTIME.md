@@ -38,6 +38,9 @@ RuntimeEvent
 - Supervisor capability return is implicit
 - final terminates
 - runtime max_steps guards loops
+- every Run binds an immutable graph version and definition hash
+- parallel StatePatch writers require deterministic reducers
+- LangGraph is the only graph execution engine
 
 ## First Tasks
 

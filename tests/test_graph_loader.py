@@ -1,12 +1,9 @@
 """Tests for graph loader."""
 from __future__ import annotations
 
-import io
-
 import pytest
 import yaml
 
-from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
 from app.graph.loader import load_graph_from_yaml
 from app.services.errors import GraphValidationError
 

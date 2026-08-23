@@ -1,8 +1,8 @@
 """Tests for EventEmitter."""
 from __future__ import annotations
 
-from app.core.state import EventType, RuntimeEvent
-from app.services.events import EventEmitter
+from app.core.state import EventType
+from app.services.events import DurableEventEmitter, EventEmitter
 
 
 class TestEventEmitter:
@@ -55,3 +55,22 @@ class TestEventEmitter:
         emitter.subscribe(callback)
         emitter.emit(EventType.run_started, "r1")
         assert len(received) == 1
+
+
+async def test_durable_emitter_persists_events_in_emission_order():
+    class FakeRepository:
+        def __init__(self):
+            self.events = []
+
+        async def append_many(self, _run_id, events):
+            self.events.extend(events)
+
+    repository = FakeRepository()
+    emitter = DurableEventEmitter(repository)
+    emitter.emit(EventType.run_started, "r1")
+    emitter.emit(EventType.node_started, "r1", node="draft")
+    await emitter.drain()
+    assert [event.type for event in repository.events] == [
+        EventType.run_started,
+        EventType.node_started,
+    ]

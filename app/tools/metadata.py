@@ -1,19 +1,19 @@
 """ToolDef: metadata schema for one concrete tool."""
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
 
 
-class ToolSource(str, Enum):
+class ToolSource(StrEnum):
     builtin = "builtin"
     mcp = "mcp"
     openapi = "openapi"
 
 
-class ToolRisk(str, Enum):
+class ToolRisk(StrEnum):
     read = "read"
     write = "write"
     sensitive = "sensitive"

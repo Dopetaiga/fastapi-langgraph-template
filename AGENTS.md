@@ -14,7 +14,7 @@ Primary stack:
 - LiteLLM Proxy
 - PostgreSQL
 - pgvector
-- one fixed long-term memory backend
+- Mem0 as the fixed long-term memory backend
 - MCP + OpenAPI tools
 - OpenTelemetry
 
@@ -209,7 +209,11 @@ First worker queue implementation uses PostgreSQL.
 
 LiteLLM is the model gateway.
 
-The selected memory backend is used directly behind a thin service.
+Model calls use a thin project-owned ModelGateway implemented by LiteLLM. This
+is an anti-corruption and testing boundary, not a dynamic provider framework.
+
+Mem0 is used directly behind a thin MemoryService. This is an anti-corruption
+and testing boundary, not a dynamic memory-provider framework.
 
 RAG uses PostgreSQL + pgvector.
 

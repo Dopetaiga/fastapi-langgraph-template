@@ -4,8 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.core.state import ErrorCategory, NormalizedError
-from app.services.errors import RAGError as _RAGError
+from app.core.state import ErrorCategory
 from app.tools.result import ToolResult
 
 

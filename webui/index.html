@@ -1,199 +1,97 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#0f1117">
-  <title>Agent Runtime — Dashboard</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <title>Runtime Atlas · Agent 执行控制室</title>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-  <a href="#main" class="skip-link">跳转到主内容</a>
-  <div class="app">
-    <!-- Sidebar -->
-    <nav class="sidebar">
-      <div class="logo">
-        <span class="logo-icon" aria-hidden="true">&#9678;</span>
-        <span class="logo-text">Agent Runtime</span>
-      </div>
-      <ul class="nav">
-        <li class="active"><a href="#" data-page="dashboard" aria-label="仪表盘">&#9632; 仪表盘</a></li>
-        <li><a href="#" data-page="runs" aria-label="Run 管理">&#9656; Run 管理</a></li>
-        <li><a href="#" data-page="approvals" aria-label="审批">&#10003; 审批</a></li>
-        <li><a href="#" data-page="memory" aria-label="记忆">&#128451; 记忆</a></li>
-        <li><a href="#" data-page="graph" aria-label="图拓扑">&#9899; 图拓扑</a></li>
-      </ul>
-      <div class="sidebar-footer">
-        <span class="status-dot" aria-hidden="true"></span> <span>运行中</span>
-      </div>
-    </nav>
+  <a class="skip" href="#workspace">跳到工作区</a>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand"><span class="brand-mark">RA</span><div><strong>Runtime Atlas</strong><small>Agent execution control</small></div></div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-page="runs"><span>01</span>运行</button>
+        <button class="nav-item" data-page="approvals"><span>02</span>审批</button>
+        <button class="nav-item" data-page="knowledge"><span>03</span>知识库</button>
+        <button class="nav-item" data-page="memory"><span>04</span>长期记忆</button>
+        <button class="nav-item" data-page="graph"><span>05</span>图结构</button>
+      </nav>
+      <div class="system-state"><i id="health-dot"></i><div><b id="health-label">正在检查</b><small>API / worker 分离运行</small></div></div>
+    </aside>
 
-    <!-- Main Content -->
-    <main class="main" id="main">
-      <!-- Dashboard -->
-      <section id="page-dashboard" class="page active">
-        <h1>仪表盘</h1>
-        <div class="cards">
-          <div class="card">
-            <div class="card-label">总 Run 数</div>
-            <div class="card-value" id="stat-total">0</div>
-          </div>
-          <div class="card">
-            <div class="card-label">运行中</div>
-            <div class="card-value" id="stat-running">0</div>
-          </div>
-          <div class="card">
-            <div class="card-label">已完成</div>
-            <div class="card-value" id="stat-completed">0</div>
-          </div>
-          <div class="card">
-            <div class="card-label">失败</div>
-            <div class="card-value" id="stat-failed">0</div>
-          </div>
-          <div class="card">
-            <div class="card-label">待审批</div>
-            <div class="card-value" id="stat-approvals">0</div>
-          </div>
+    <main id="workspace" class="workspace">
+      <header class="topbar">
+        <div><p class="eyebrow">REFERENCE RUNTIME / V0.1</p><h1 id="page-title">运行工作台</h1></div>
+        <button class="primary" id="new-run-button">新建 Run <kbd>N</kbd></button>
+      </header>
+
+      <section class="page active" id="page-runs">
+        <div class="metric-strip" aria-label="运行统计">
+          <div><span>全部</span><b id="metric-all">0</b></div><div><span>排队 / 执行</span><b id="metric-active">0</b></div>
+          <div><span>暂停</span><b id="metric-paused">0</b></div><div><span>完成率</span><b id="metric-rate">—</b></div>
         </div>
-        <div class="actions">
-          <button class="btn btn-primary" onclick="app.createRun()">+ 新建 Run</button>
-          <button class="btn btn-secondary" onclick="app.runWorker()">运行 Worker</button>
-        </div>
-        <h2>最近 Run</h2>
-        <div class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Run ID</th>
-                <th>图</th>
-                <th>输入</th>
-                <th>状态</th>
-                <th>创建时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="runs-table-body">
-              <tr><td colspan="6" class="empty">暂无数据，点击「新建 Run」开始</td></tr>
-            </tbody>
-          </table>
+        <div class="split">
+          <article class="panel run-list-panel">
+            <div class="panel-head"><div><p class="kicker">RUN LEDGER</p><h2>最近执行</h2></div><button class="quiet" id="refresh-runs">刷新</button></div>
+            <div id="run-list" class="run-list"><div class="empty">正在读取运行记录…</div></div>
+          </article>
+          <article class="panel detail-panel">
+            <div id="run-detail-empty" class="empty-state"><div class="pulse-symbol">◎</div><h2>选择一个 Run</h2><p>查看不可变图快照、输出与实时执行轨道。</p></div>
+            <div id="run-detail" hidden>
+              <div class="panel-head"><div><p class="kicker">LIVE EXECUTION</p><h2 id="detail-title">Run</h2></div><button class="danger-quiet" id="cancel-run">取消</button></div>
+              <dl class="run-facts" id="run-facts"></dl>
+              <div class="output-block"><span>最终输出</span><pre id="run-output">等待 Supervisor 完成…</pre></div>
+              <div class="timeline-head"><span>事件轨道</span><small id="stream-state">未连接</small></div>
+              <ol id="event-track" class="event-track"></ol>
+            </div>
+          </article>
         </div>
       </section>
 
-      <!-- Create Run -->
-      <section id="page-create-run" class="page">
-        <h1>新建 Run</h1>
-        <div class="form-card">
-          <div class="form-group">
-            <label for="cr-session">Session ID</label>
-            <input type="text" id="cr-session" name="session_id" autocomplete="off" placeholder="session-001" value="session-001">
-          </div>
-          <div class="form-group">
-            <label for="cr-graph">Graph Name</label>
-            <input type="text" id="cr-graph" name="graph_name" autocomplete="off" placeholder="default" value="default">
-          </div>
-          <div class="form-group">
-            <label for="cr-input">输入文本</label>
-            <textarea id="cr-input" name="input_text" rows="4" placeholder="输入你的请求…" spellcheck="false">calculate 1+1</textarea>
-          </div>
-          <div class="actions">
-            <button class="btn btn-primary" onclick="app.submitCreateRun()">创建并执行</button>
-            <button class="btn btn-ghost" onclick="app.navigate('dashboard')">取消</button>
-          </div>
+      <section class="page" id="page-approvals">
+        <div class="section-intro"><p class="kicker">HUMAN CONTROL POINT</p><h2>冻结参数后再决定</h2><p>批准只恢复当前 PendingAction；参数哈希确保恢复时执行的仍是同一动作。</p></div>
+        <div class="query-row"><label>Run ID<input id="approval-run-id" placeholder="粘贴暂停中的 run_id"></label><button class="primary" id="load-approvals">查询审批</button></div>
+        <div id="approval-list" class="approval-list"><div class="empty">输入 Run ID 查看审批。</div></div>
+      </section>
+
+      <section class="page" id="page-knowledge">
+        <div class="section-intro"><p class="kicker">PGVECTOR KNOWLEDGE</p><h2>知识入库与相似度检索</h2><p>文档经 LiteLLM embedding 后写入 PostgreSQL vector(1536)，与 Mem0 长期记忆完全分离。</p></div>
+        <div class="form-grid">
+          <form class="panel form-panel" id="kb-form"><h3>1 · 创建知识库</h3><label>名称<input name="name" required placeholder="engineering-handbook"></label><label>描述<textarea name="description" rows="3" placeholder="团队工程规范"></textarea></label><button class="primary">创建知识库</button><output id="kb-result"></output></form>
+          <form class="panel form-panel" id="doc-form"><h3>2 · 写入文本</h3><label>Knowledge Base ID<input name="knowledge_base_id" required></label><label>文件名<input name="filename" required value="notes.txt"></label><label>正文<textarea name="content" rows="5" required></textarea></label><button class="primary">切块并入库</button><output id="doc-result"></output></form>
+          <form class="panel form-panel" id="rag-form"><h3>3 · 检索验证</h3><label>Knowledge Base ID<input name="knowledge_base_id" required></label><label>问题<input name="query" required></label><button class="primary">执行检索</button><output id="rag-result" class="result-stack"></output></form>
         </div>
       </section>
 
-      <!-- Run Detail -->
-      <section id="page-run-detail" class="page">
-        <div class="page-header">
-          <h1>Run Detail</h1>
-          <button class="btn btn-ghost" onclick="app.navigate('dashboard')" aria-label="返回仪表盘">← 返回</button>
-        </div>
-        <div class="run-info" id="run-info"></div>
-        <h2>事件流</h2>
-        <div class="event-stream" id="event-stream">
-          <div class="empty">等待事件…</div>
+      <section class="page" id="page-memory">
+        <div class="section-intro"><p class="kicker">MEM0 LONG-TERM MEMORY</p><h2>跨会话记忆，不是 RAG</h2><p>所有操作通过项目自有 MemoryStore；未配置 Mem0 时接口明确返回 503。</p></div>
+        <div class="form-grid memory-grid">
+          <form class="panel form-panel" id="memory-add-form"><h3>写入对话事实</h3><label>User ID<input name="user_id" required value="demo-user"></label><label>用户消息<textarea name="content" rows="4" required placeholder="我偏好 Python 和深色主题"></textarea></label><button class="primary">交给 Mem0 提取</button></form>
+          <form class="panel form-panel" id="memory-search-form"><h3>检索用户记忆</h3><label>User ID<input name="user_id" required value="demo-user"></label><label>查询<input name="query" required placeholder="用户喜欢什么技术？"></label><button class="primary">搜索记忆</button></form>
+          <article class="panel memory-results"><h3>结果</h3><div id="memory-results" class="result-stack"><div class="empty">执行写入、搜索或列表操作。</div></div></article>
         </div>
       </section>
 
-      <!-- Approvals -->
-      <section id="page-approvals" class="page">
-        <h1>审批管理</h1>
-        <div class="form-group">
-          <label for="apr-run-id">Run ID</label>
-          <input type="text" id="apr-run-id" name="run_id" autocomplete="off" placeholder="输入 run_id" value="">
-        </div>
-        <button class="btn btn-primary" onclick="app.loadApprovals()">查询待审批</button>
-        <div class="table-wrap" style="margin-top: 1rem;">
-          <table class="table">
-            <thead>
-              <tr><th>ID</th><th>Run ID</th><th>操作</th><th>状态</th><th>创建时间</th><th>操作</th></tr>
-            </thead>
-            <tbody id="approvals-table"><tr><td colspan="6" class="empty">输入 Run ID 查询</td></tr></tbody>
-          </table>
-        </div>
-      </section>
-
-      <!-- Memory -->
-      <section id="page-memory" class="page">
-        <h1>记忆管理</h1>
-        <div class="tabs">
-          <button class="tab active" onclick="app.switchMemoryTab('user')">用户记忆</button>
-          <button class="tab" onclick="app.switchMemoryTab('team')">团队记忆</button>
-        </div>
-        <div id="memory-user" class="memory-panel">
-          <div class="form-row">
-            <input type="text" id="mem-user-id" name="user_id" autocomplete="off" placeholder="User ID" value="u1">
-            <input type="text" id="mem-user-key" name="key" autocomplete="off" placeholder="Key" value="lang">
-            <input type="text" id="mem-user-value" name="value" placeholder='{"key":"value"}' value='{"lang":"python"}' autocomplete="off">
-            <button class="btn btn-primary" onclick="app.putUserMemory()">存储</button>
-          </div>
-          <button class="btn btn-secondary" onclick="app.loadUserMemory()">刷新列表</button>
-          <div class="table-wrap" style="margin-top: 1rem;">
-            <table class="table">
-              <thead><tr><th>User ID</th><th>Key</th><th>Value</th><th>Namespace</th></tr></thead>
-              <tbody id="user-memory-table"><tr><td colspan="4" class="empty">点击「刷新列表」</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-        <div id="memory-team" class="memory-panel" style="display:none;">
-          <div class="form-row">
-            <input type="text" id="mem-team-id" name="team_id" autocomplete="off" placeholder="Team ID" value="team-1">
-            <input type="text" id="mem-team-key" name="key" autocomplete="off" placeholder="Key" value="goal">
-            <input type="text" id="mem-team-value" name="value" placeholder='{"key":"value"}' value='{"goal":"launch"}' autocomplete="off">
-            <button class="btn btn-primary" onclick="app.putTeamMemory()">存储</button>
-          </div>
-          <button class="btn btn-secondary" onclick="app.loadTeamMemory()">刷新列表</button>
-          <div class="table-wrap" style="margin-top: 1rem;">
-            <table class="table">
-              <thead><tr><th>Team ID</th><th>Key</th><th>Value</th></tr></thead>
-              <tbody id="team-memory-table"><tr><td colspan="3" class="empty">点击「刷新列表」</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <!-- Graph -->
-      <section id="page-graph" class="page">
-        <h1>图拓扑</h1>
-        <div class="graph-canvas" id="graph-canvas">
-          <svg id="graph-svg" role="img" aria-label="图拓扑可视化"></svg>
-        </div>
-        <div class="graph-legend">
-          <span class="legend-item"><span class="dot llm" aria-hidden="true"></span>LLM</span>
-          <span class="legend-item"><span class="dot supervisor" aria-hidden="true"></span>Supervisor</span>
-          <span class="legend-item"><span class="dot tool" aria-hidden="true"></span>Tool</span>
-          <span class="legend-item"><span class="dot subagent" aria-hidden="true"></span>Subagent</span>
-          <span class="legend-item"><span class="dot rag" aria-hidden="true"></span>RAG</span>
-          <span class="legend-item"><span class="dot approval" aria-hidden="true"></span>Approval</span>
-          <span class="legend-item"><span class="dot transform" aria-hidden="true"></span>Transform</span>
-        </div>
+      <section class="page" id="page-graph">
+        <div class="section-intro graph-heading"><div><p class="kicker">LANGGRAPH TOPOLOGY</p><h2>主图执行线路</h2><p>能力节点执行后自动回到唯一 Supervisor；运行时关注项不暴露为节点。</p></div><select id="graph-select" aria-label="选择图"></select></div>
+        <article class="panel graph-panel"><svg id="graph-svg" role="img" aria-label="Agent 图结构"></svg><div id="graph-inspector" class="graph-inspector">选择节点查看 prompt 与配置。</div></article>
       </section>
     </main>
   </div>
 
-  <!-- Toast -->
-  <div id="toast" class="toast" aria-live="polite" role="status"></div>
-
+  <dialog id="run-dialog">
+    <form method="dialog" id="run-form"><div class="dialog-head"><div><p class="kicker">QUEUE A DURABLE RUN</p><h2>新建 Run</h2></div><button value="cancel" class="icon-button" aria-label="关闭">×</button></div>
+      <label>Session ID<input name="session_id" required value="demo-session"></label>
+      <label>执行图<select name="graph_name" id="run-graph-select"></select></label>
+      <label>用户请求<textarea name="input_text" rows="5" required placeholder="分析这个运行时架构，并给出改进建议。"></textarea></label>
+      <p class="form-note">创建后由独立 PostgreSQL worker 异步领取，不在 API 请求内执行。</p>
+      <div class="dialog-actions"><button value="cancel" class="quiet">取消</button><button value="default" class="primary" id="queue-run">加入队列</button></div>
+    </form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

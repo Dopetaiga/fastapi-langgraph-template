@@ -4,6 +4,8 @@ from __future__ import annotations
 import operator
 from typing import Any
 
+from app.tools.metadata import ToolDef, ToolRisk
+
 _OPS = {
     "add": operator.add,
     "sub": operator.sub,
@@ -19,9 +21,6 @@ def calculator(operation: str, a: float, b: float) -> Any:
         raise ValueError(f"unknown operation: {operation}")
     return {"value": op(a, b), "operation": operation}
 
-
-# ToolDef for registration
-from app.tools.metadata import ToolDef, ToolRisk
 
 CALCULATOR_TOOL = ToolDef(
     name="calculator",

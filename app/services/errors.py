@@ -22,6 +22,14 @@ class ApprovalRequiredError(AppError):
     """Raised when a sensitive tool needs human approval."""
 
 
+class RunPausedError(AppError):
+    """Raised when LangGraph persisted an interrupt and paused a Run."""
+
+    def __init__(self, interrupts) -> None:
+        super().__init__("run paused for approval")
+        self.interrupts = interrupts
+
+
 class SubagentError(AppError):
     """Raised when a subagent execution fails."""
 

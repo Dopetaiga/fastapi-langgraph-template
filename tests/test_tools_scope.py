@@ -1,8 +1,6 @@
 """Tests for ToolScope (allow/deny)."""
 from __future__ import annotations
 
-import pytest
-
 from app.tools.scope import ToolScope
 
 

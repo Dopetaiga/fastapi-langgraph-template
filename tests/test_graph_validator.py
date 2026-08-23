@@ -1,9 +1,8 @@
 """Tests for graph validator (all architecture invariants)."""
 from __future__ import annotations
 
-from pydantic import ValidationError
-
 import pytest
+from pydantic import ValidationError
 
 from app.core.state import NodeType
 from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef

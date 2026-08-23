@@ -1,69 +1,202 @@
-"""OpenTelemetry instrumentation module.
-
-Note: opentelemetry packages are optional. Install with:
-  pip install opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-fastapi opentelemetry-exporter-otlp
-"""
+"""OpenTelemetry bootstrap for traces, metrics, and correlated logs."""
 from __future__ import annotations
 
-_tracer = None
+import json
+import logging
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from threading import Lock
+from typing import Any
+
+from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
+from opentelemetry.trace import Status, StatusCode
+
+_lock = Lock()
+_provider: TracerProvider | None = None
+_meter_provider: MeterProvider | None = None
+_logger_provider: LoggerProvider | None = None
+_httpx_instrumented = False
 
 
-def setup_telemetry(service_name: str = "agent-runtime", otlp_endpoint: str = "http://localhost:4317") -> None:
-    """Initialize OpenTelemetry tracing. No-op if packages not installed."""
-    global _tracer
-    try:
-        from opentelemetry import trace
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+class JsonFormatter(logging.Formatter):
+    """Compact stdout JSON with trace correlation; never serializes arbitrary objects."""
 
-        provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-        processor = SimpleSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint))
-        provider.add_span_processor(processor)
-        trace.set_tracer_provider(provider)
-        _tracer = trace.get_tracer(__name__)
-    except ImportError:
-        pass
+    def format(self, record: logging.LogRecord) -> str:
+        span_context = trace.get_current_span().get_span_context()
+        payload: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "severity": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if span_context.is_valid:
+            payload["trace_id"] = format(span_context.trace_id, "032x")
+            payload["span_id"] = format(span_context.span_id, "016x")
+        for key in ("run_id", "job_id", "node_id", "event_type"):
+            value = getattr(record, key, None)
+            if isinstance(value, (str, int, float, bool)):
+                payload[key] = value
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def create_tracer_provider(service_name: str, exporter: SpanExporter) -> TracerProvider:
+    """Create an isolated provider; useful for deterministic tests."""
+    provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    return provider
+
+
+def setup_telemetry(
+    service_name: str = "agent-runtime",
+    otlp_endpoint: str = "http://localhost:4317",
+    *,
+    insecure: bool = True,
+    enabled: bool = True,
+    metrics_export_interval_ms: int = 15000,
+    log_level: str = "INFO",
+    log_json: bool = True,
+) -> TracerProvider | None:
+    """Configure all three OTLP signals and Python log correlation exactly once."""
+    global _provider, _meter_provider, _logger_provider, _httpx_instrumented
+    if not enabled:
+        return None
+    with _lock:
+        if _provider is not None:
+            return _provider
+        resource = Resource.create({"service.name": service_name})
+        _provider = create_tracer_provider(
+            service_name, OTLPSpanExporter(endpoint=otlp_endpoint, insecure=insecure)
+        )
+        trace.set_tracer_provider(_provider)
+
+        metric_reader = PeriodicExportingMetricReader(
+            OTLPMetricExporter(endpoint=otlp_endpoint, insecure=insecure),
+            export_interval_millis=metrics_export_interval_ms,
+        )
+        _meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+        metrics.set_meter_provider(_meter_provider)
+
+        _logger_provider = LoggerProvider(resource=resource)
+        _logger_provider.add_log_record_processor(BatchLogRecordProcessor(
+            OTLPLogExporter(endpoint=otlp_endpoint, insecure=insecure)
+        ))
+        set_logger_provider(_logger_provider)
+        root = logging.getLogger()
+        root.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+        if log_json and not any(getattr(h, "_agent_json", False) for h in root.handlers):
+            console = logging.StreamHandler()
+            console.setFormatter(JsonFormatter())
+            console._agent_json = True  # type: ignore[attr-defined]
+            root.addHandler(console)
+        if not any(isinstance(h, LoggingHandler) for h in root.handlers):
+            root.addHandler(LoggingHandler(logger_provider=_logger_provider))
+        if not _httpx_instrumented:
+            HTTPXClientInstrumentor().instrument()
+            _httpx_instrumented = True
+        return _provider
 
 
 def instrument_fastapi(app) -> None:
-    """Auto-instrument FastAPI app. No-op if packages not installed."""
-    try:
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-        FastAPIInstrumentor.instrument_app(app)
-    except ImportError:
-        pass
+    """Instrument one FastAPI application without tracing health probes."""
+    if getattr(app.state, "otel_instrumented", False):
+        return
+    FastAPIInstrumentor.instrument_app(app, excluded_urls="health")
+    app.state.otel_instrumented = True
 
 
-def get_tracer():
-    """Return tracer if available, else a no-op."""
-    global _tracer
-    if _tracer is not None:
-        return _tracer
-    try:
-        from opentelemetry import trace
-        _tracer = trace.get_tracer(__name__)
-        return _tracer
-    except ImportError:
-        return _NoOpTracer()
+def get_tracer(name: str = "agent-runtime"):
+    return trace.get_tracer(name)
 
 
-class _NoOpTracer:
-    def start_as_current_span(self, name, **kwargs):
-        return _NoOpContextManager()
+def get_meter(name: str = "agent-runtime"):
+    return metrics.get_meter(name)
 
 
-class _NoOpContextManager:
-    def __enter__(self):
-        return self
+_meter = get_meter()
+operation_count = _meter.create_counter(
+    "agent_runtime.operation.count", description="Completed runtime operations"
+)
+operation_duration = _meter.create_histogram(
+    "agent_runtime.operation.duration", unit="s", description="Runtime operation latency"
+)
+llm_tokens = _meter.create_counter(
+    "gen_ai.client.token.usage", unit="{token}", description="LLM input and output tokens"
+)
+llm_cost = _meter.create_counter(
+    "gen_ai.client.cost", unit="USD", description="Provider-reported LLM cost"
+)
+worker_jobs = _meter.create_counter("agent_runtime.worker.jobs", description="Worker job outcomes")
+worker_queue_delay = _meter.create_histogram(
+    "agent_runtime.worker.queue.delay", unit="s", description="Time from enqueue to claim"
+)
+sse_connections = _meter.create_up_down_counter(
+    "agent_runtime.sse.connections", description="Active SSE connections"
+)
+sse_events = _meter.create_counter("agent_runtime.sse.events", description="SSE events delivered")
 
-    def __exit__(self, *args):
-        pass
 
-    async def __aenter__(self):
-        return self
+def record_operation(operation: str, duration_seconds: float, status: str, **dimensions: str) -> None:
+    attrs = {"operation": operation, "status": status, **dimensions}
+    operation_count.add(1, attrs)
+    operation_duration.record(duration_seconds, attrs)
 
-    async def __aexit__(self, *args):
-        pass
+
+def record_llm_usage(model: str, usage: dict[str, Any], cost_usd: float | None = None) -> None:
+    aliases = (("input", "prompt_tokens"), ("output", "completion_tokens"))
+    for token_type, key in aliases:
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            llm_tokens.add(int(value), {"gen_ai.request.model": model, "gen_ai.token.type": token_type})
+    if isinstance(cost_usd, (int, float)) and cost_usd >= 0:
+        llm_cost.add(cost_usd, {"gen_ai.request.model": model})
+
+
+@contextmanager
+def traced_span(
+    name: str,
+    attributes: dict[str, Any] | None = None,
+    *,
+    tracer_name: str = "agent-runtime",
+) -> Iterator[Any]:
+    """Create a span, record errors, and avoid attaching sensitive values."""
+    started = time.perf_counter()
+    status = "ok"
+    with get_tracer(tracer_name).start_as_current_span(name) as span:
+        for key, value in (attributes or {}).items():
+            if value is not None and isinstance(value, (str, bool, int, float)):
+                span.set_attribute(key, value)
+        try:
+            yield span
+        except Exception as exc:
+            status = "error"
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            raise
+        finally:
+            record_operation(name, time.perf_counter() - started, status)
+
+
+def shutdown_telemetry() -> None:
+    if _logger_provider is not None:
+        _logger_provider.shutdown()
+    if _meter_provider is not None:
+        _meter_provider.shutdown()
+    if _provider is not None:
+        _provider.shutdown()

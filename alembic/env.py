@@ -1,10 +1,9 @@
 from logging.config import fileConfig
-from sqlalchemy import pool
-from alembic import context
 
-from app.db.engine import engine
-from app.db.base import Base
+from alembic import context
 from app.core.config import settings
+from app.db.base import Base
+from app.db.engine import engine
 
 config = context.config
 if config.config_file_name is not None:
@@ -23,11 +22,14 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     import asyncio
 
+    def do_run_migrations(connection) -> None:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+
     async def do_run() -> None:
         async with engine.begin() as conn:
-            await conn.run_sync(context.configure, connection=conn, target_metadata=target_metadata)
-            with context.begin_transaction():
-                context.run_migrations()
+            await conn.run_sync(do_run_migrations)
 
     asyncio.run(do_run())
 

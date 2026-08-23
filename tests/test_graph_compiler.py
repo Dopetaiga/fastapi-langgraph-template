@@ -1,11 +1,11 @@
 """Tests for graph compiler."""
 from __future__ import annotations
 
-from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
-from app.graph.compiler import compile_graph
-from app.graph.validator import GraphValidationError
-
 import pytest
+
+from app.graph.compiler import compile_graph
+from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
+from app.graph.validator import GraphValidationError
 
 
 def _make(**kw):

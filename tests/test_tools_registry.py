@@ -5,9 +5,8 @@ import pytest
 
 from app.services.errors import ToolNotFoundError, ToolPermissionError
 from app.tools.builtin.calculator import CALCULATOR_TOOL
-from app.tools.metadata import ToolDef, ToolRisk
+from app.tools.metadata import ToolRisk
 from app.tools.registry import ToolRegistry
-from app.tools.result import ToolResult
 from app.tools.scope import ToolScope
 
 

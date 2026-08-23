@@ -1,31 +1,22 @@
 """Tests for embeddings and chunking utilities."""
 from __future__ import annotations
 
-import pytest
-
-from app.capabilities.embeddings import chunk_text, compute_embedding
+from app.capabilities.embeddings import chunk_text, compute_embeddings
+from app.models_gateway import EmbeddingResult
 
 
 class TestComputeEmbedding:
-    def test_returns_list(self):
-        vec = compute_embedding("hello")
-        assert isinstance(vec, list)
-        assert len(vec) == 1536
+    async def test_uses_gateway(self):
+        class FakeGateway:
+            async def embed(self, request):
+                assert request.inputs == ["hello"]
+                assert request.dimensions == 1536
+                return EmbeddingResult(embeddings=[[0.1, 0.2]])
 
-    def test_deterministic(self):
-        v1 = compute_embedding("test text")
-        v2 = compute_embedding("test text")
-        assert v1 == v2
+        assert await compute_embeddings(["hello"], FakeGateway()) == [[0.1, 0.2]]
 
-    def test_different_texts_differ(self):
-        v1 = compute_embedding("hello")
-        v2 = compute_embedding("world")
-        assert v1 != v2
-
-    def test_values_in_range(self):
-        vec = compute_embedding("test")
-        for v in vec:
-            assert -1.0 <= v <= 1.0
+    async def test_empty_input_skips_gateway(self):
+        assert await compute_embeddings([], object()) == []
 
 
 class TestChunkText:

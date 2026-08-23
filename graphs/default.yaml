@@ -1,0 +1,50 @@
+name: default
+entry: normalize
+exit: END
+nodes:
+  - id: draft
+    type: llm
+    prompt: Produce a concise first-pass response to the user request.
+  - id: supervisor
+    type: supervisor
+    prompt: >-
+      Decide whether to call one declared capability or finish. Return the
+      required structured SupervisorDecision and never invent node ids.
+  - id: tools
+    type: tool
+  - id: knowledge
+    type: rag
+  - id: specialist
+    type: subagent
+    config:
+      template: react
+      allowed_tools:
+        - calculator
+        - datetime
+  - id: approval
+    type: approval
+    config:
+      action: external_write
+      risk: sensitive
+  - id: normalize
+    type: transform
+    config:
+      operation: strip
+      output_ref: normalized_input
+edges:
+  - source: normalize
+    target: draft
+  - source: draft
+    target: supervisor
+  - source: supervisor
+    target: tools
+    condition: tool
+  - source: supervisor
+    target: knowledge
+    condition: rag
+  - source: supervisor
+    target: specialist
+    condition: subagent
+  - source: supervisor
+    target: approval
+    condition: approval
