@@ -1,9 +1,9 @@
 # Agent Runtime Starter
 
-> 面向学习、实习求职与工程实践的现代 Agent Runtime 参考实现。
-> A modern Agent Runtime reference for learning, internships, and engineering practice.
+> 面向学习工程实践的现代 Agent Runtime 参考实现。
+> A modern Agent Runtime reference for learning and engineering practice.
 
-Agent Runtime Starter 不是聊天机器人 Demo，也不是试图包揽一切的 Agent 平台。它聚焦一个具体问题：**如何把基于 LangGraph 的 Agent，从“能调用模型”做成可持久化、可恢复、可观测、可测试的后端运行时。**
+Agent Runtime Starter 聚焦于：**如何把基于 LangGraph 的 Agent，从“能调用模型”做成可持久化、可恢复、可观测、可测试的后端运行时。**
 
 项目采用 FastAPI、LangGraph、PostgreSQL/pgvector、LiteLLM 和 Mem0，并刻意保持清晰的产品边界。你可以配置图、提示词、工具范围、RAG 范围和一级子代理，但这里不会发展成多租户 SaaS、插件市场、自研模型网关或无限递归的多代理系统。
 
