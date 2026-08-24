@@ -275,27 +275,30 @@ async def _seed_run_with_job(
     job_id: str | None = None,
     run_status: str = "queued",
     job_fields: dict | None = None,
+    graph_snapshot: dict | None = None,
 ) -> None:
     async for session in get_session():
-        session.add(SessionModel(id=session_id))
-        await session.flush()
-        session.add(RunModel(
+        # Reuse the shared session row; concurrent seeds must not collide.
+        if await session.get(SessionModel, session_id) is None:
+            session.add(SessionModel(id=session_id))
+            await session.flush()
+        run = RunModel(
             id=run_id,
             session_id=session_id,
             status=run_status,
             graph_name="integration",
             graph_version="1",
             input_text="hello",
-        ))
+            graph_snapshot=graph_snapshot,
+        )
+        session.add(run)
+        # Flush the parent explicitly: worker-table inserts elsewhere in this
+        # suite always rely on flushed parents rather than UOW ordering.
+        await session.flush()
         if job_id is not None:
-            session.add(JobModel(
-                id=job_id,
-                run_id=run_id,
-                status="queued",
-                attempt_count=0,
-                max_attempts=3,
-                **(job_fields or {}),
-            ))
+            job_kwargs = {"status": "queued", "attempt_count": 0, "max_attempts": 3}
+            job_kwargs.update(job_fields or {})
+            session.add(JobModel(id=job_id, run_id=run_id, **job_kwargs))
         await session.commit()
         break
 
@@ -417,7 +420,20 @@ async def test_execute_uses_frozen_model_over_settings() -> None:
     identity = str(uuid.uuid4())
     session_id = f"frozen-session-{identity}"
     run_id = f"frozen-run-{identity}"
-    await _seed_run_with_job(session_id=session_id, run_id=run_id, run_status="running")
+    # A supervisor-only snapshot: the capturing gateway answers "final"
+    # immediately, so execution exercises the frozen model choice end-to-end.
+    definition = AgentDefinition(
+        name="integration",
+        nodes=[NodeDef(type="supervisor", id="supervisor")],
+        edges=[],
+        entry="supervisor",
+    )
+    await _seed_run_with_job(
+        session_id=session_id,
+        run_id=run_id,
+        run_status="running",
+        graph_snapshot=definition.model_dump(mode="json"),
+    )
     async for session in get_session():
         run = await session.get(RunModel, run_id)
         run.model_decision = {
