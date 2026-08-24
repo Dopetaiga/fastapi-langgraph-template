@@ -100,3 +100,33 @@ class TestNoNestedSubagent:
         ])
         with pytest.raises(GraphValidationError, match="nested subagent"):
             validate_graph(g)
+
+
+class TestEntryAndReachability:
+    def test_entry_must_reference_existing_node(self):
+        g = _make(entry="ghost")
+        with pytest.raises(GraphValidationError, match="entry"):
+            validate_graph(g)
+
+    def test_unreachable_node_fails(self):
+        g = _make(
+            nodes=[NodeDef(type="llm", id="a"), NodeDef(type="transform", id="orphan"),
+                   NodeDef(type="supervisor", id="s1")],
+            edges=[EdgeDef(source="a", target="s1")],
+            entry="a",
+        )
+        with pytest.raises(GraphValidationError, match="unreachable"):
+            validate_graph(g)
+
+    def test_capability_reachable_via_supervisor_dispatch(self):
+        """Capabilities connect implicitly to the supervisor (A2/A3)."""
+        g = _make(
+            nodes=[
+                NodeDef(type="llm", id="a"),
+                NodeDef(type="supervisor", id="s1"),
+                NodeDef(type="tool", id="t1"),
+            ],
+            edges=[EdgeDef(source="a", target="s1")],
+            entry="a",
+        )
+        validate_graph(g)

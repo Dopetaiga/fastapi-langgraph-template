@@ -1,6 +1,8 @@
 """Application error hierarchy and GraphValidationError."""
 from __future__ import annotations
 
+from app.core.state import ErrorCategory
+
 
 class AppError(Exception):
     """Base application error."""
@@ -8,6 +10,29 @@ class AppError(Exception):
 
 class GraphValidationError(AppError):
     """Raised when a graph definition fails semantic validation."""
+
+
+class ModelCallError(AppError):
+    """Raised when a model/embedding call fails inside graph execution.
+
+    Carries the normalized category so runtime code never needs to know the
+    provider error shape.
+    """
+
+    def __init__(self, message: str, *, category: ErrorCategory = ErrorCategory.provider_error,
+                 recoverable: bool = True) -> None:
+        super().__init__(message)
+        self.category = category
+        self.recoverable = recoverable
+
+
+class RunCancelledError(AppError):
+    """Raised when a node observes that its Run was cancelled mid-execution."""
+
+
+class JobLeaseLostError(AppError):
+    """Raised when a worker loses its job lease and must abort the handler."""
+
 
 
 class ToolNotFoundError(AppError):

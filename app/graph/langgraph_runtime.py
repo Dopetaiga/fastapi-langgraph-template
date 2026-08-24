@@ -5,7 +5,8 @@ import hashlib
 import inspect
 import json
 import operator
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, TypedDict
 
@@ -13,16 +14,26 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
 
+from app.capabilities.approval import ApprovalStatus
 from app.capabilities.rag import Retriever
 from app.capabilities.subagent import ReActExecutor, SubagentTask
-from app.core.state import AgentState, EventType, SupervisorDecision
+from app.core.state import AgentState, ErrorCategory, EventType, SupervisorDecision
 from app.graph.schemas import CompiledGraph, NodeDef
 from app.models_gateway import ModelGateway, ModelRequest
 from app.observability.telemetry import traced_span
 from app.services.approval_repository import ApprovalRepository, PendingAction
-from app.services.errors import GraphValidationError, RAGError, RunPausedError, SubagentError
+from app.services.errors import (
+    GraphValidationError,
+    ModelCallError,
+    RAGError,
+    RunCancelledError,
+    RunPausedError,
+    SubagentError,
+)
 from app.services.events import EventEmitter
+from app.tools.metadata import ToolRisk
 from app.tools.registry import ToolRegistry
+from app.tools.result import ToolResult
 
 
 def _merge_dict(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
@@ -47,6 +58,8 @@ class RuntimeDependencies:
     retriever: Retriever | None = None
     subagent_executor: ReActExecutor | None = None
     approval_repository: ApprovalRepository | None = None
+    # Returns True when the Run was cancelled and execution must stop.
+    cancel_check: Callable[[str], Awaitable[bool]] | None = None
 
 
 @dataclass(slots=True)
@@ -142,6 +155,8 @@ def compile_langgraph(
 def _make_node(node_def: NodeDef, compiled: CompiledGraph, deps: RuntimeDependencies):
     async def run(state: LangGraphState) -> dict[str, Any]:
         run_id = str(state.get("runtime", {}).get("run_id", "unknown"))
+        if deps.cancel_check is not None and await deps.cancel_check(run_id):
+            raise RunCancelledError(f"run {run_id} cancelled before node {node_def.id}")
         deps.emitter.emit(EventType.node_started, run_id, node=node_def.id)
         with traced_span("graph.node", {
             "agent.run_id": run_id,
@@ -185,7 +200,12 @@ async def _run_llm(
         metadata={"run_id": run_id, "node_id": node_def.id},
     ))
     if not result.success:
-        raise RuntimeError(result.error.message if result.error else "model call failed")
+        error = result.error
+        raise ModelCallError(
+            error.message if error else "model call failed",
+            category=error.category if error else ErrorCategory.provider_error,
+            recoverable=error.recoverable if error else True,
+        )
     return {"messages": [{"role": "assistant", "content": result.content}]}
 
 
@@ -209,7 +229,12 @@ async def _run_supervisor(
             metadata={"run_id": run_id, "node_id": node_def.id},
         ))
     if not result.success or result.structured is None:
-        raise RuntimeError(result.error.message if result.error else "invalid supervisor response")
+        error = result.error
+        raise ModelCallError(
+            error.message if error else "invalid supervisor response",
+            category=error.category if error else ErrorCategory.validation_error,
+            recoverable=False,
+        )
     decision = SupervisorDecision.model_validate(result.structured)
     _validate_decision(decision, compiled)
     patch: dict[str, Any] = {"control": {"supervisor_decision": decision.model_dump()}}
@@ -245,13 +270,29 @@ async def _run_tool(
     tool_name = resource.get("tool_name") or node_def.config.get("tool")
     if not tool_name:
         raise GraphValidationError("Supervisor did not select a tool resource")
+    arguments = decision.input or {}
     deps.emitter.emit(EventType.tool_started, run_id, node=node_def.id, payload={"tool": tool_name})
     with traced_span("tool.call", {
         "agent.run_id": run_id,
         "agent.node_id": node_def.id,
         "tool.name": tool_name,
     }):
-        result = await deps.tool_registry.ainvoke(tool_name, decision.input or {})
+        if _tool_requires_approval(deps, tool_name):
+            decision_value, _, _ = await _require_approval(
+                deps, run_id, node_def,
+                action=f"tool:{tool_name}",
+                tool_name=str(tool_name),
+                arguments=arguments,
+            )
+            if decision_value != ApprovalStatus.approved.value:
+                result = ToolResult.fail(
+                    ErrorCategory.permission_denied,
+                    f"sensitive tool '{tool_name}' was not approved",
+                )
+            else:
+                result = await deps.tool_registry.ainvoke(tool_name, arguments)
+        else:
+            result = await deps.tool_registry.ainvoke(tool_name, arguments)
     deps.emitter.emit(
         EventType.tool_completed,
         run_id,
@@ -318,7 +359,7 @@ async def _run_subagent(
             result = await result
     deps.emitter.emit(EventType.subagent_completed, run_id, node=node_def.id, payload={"status": result.status})
     existing = list(state.get("data", {}).get("subagent_results", []))
-    return {"data": {"subagent_results": [*existing, result.__dict__]}}
+    return {"data": {"subagent_results": [*existing, asdict(result)]}}
 
 
 async def _run_approval(
@@ -330,9 +371,46 @@ async def _run_approval(
     if deps.approval_repository is None:
         raise GraphValidationError("ApprovalRepository not configured")
     decision = _decision_from_state(state)
-    arguments = decision.input or {}
-    resource = decision.resource or {}
-    tool_name = resource.get("tool_name")
+    decision_value, approval_id, action_id = await _require_approval(
+        deps,
+        run_id,
+        node_def,
+        action=str(node_def.config.get("action", decision.action)),
+        tool_name=(decision.resource or {}).get("tool_name"),
+        arguments=decision.input or {},
+    )
+    existing = list(state.get("data", {}).get("approval_results", []))
+    return {"data": {"approval_results": [*existing, {
+        "approval_id": approval_id,
+        "action_id": action_id,
+        "decision": decision_value,
+    }]}}
+
+
+def _tool_requires_approval(deps: RuntimeDependencies, tool_name: str) -> bool:
+    """Sensitive tools must pass the human approval gate before invocation."""
+    try:
+        tool_def = deps.tool_registry.get(tool_name) if deps.tool_registry else None
+    except Exception:
+        return False
+    return tool_def is not None and tool_def.risk == ToolRisk.sensitive
+
+
+async def _require_approval(
+    deps: RuntimeDependencies,
+    run_id: str,
+    node_def: NodeDef,
+    *,
+    action: str,
+    tool_name: str | None,
+    arguments: dict[str, Any],
+) -> tuple[str, str, str]:
+    """Persist a pending approval, pause via interrupt.
+
+    Returns (decision, approval_id, action_id).
+    """
+    if deps.approval_repository is None:
+        raise GraphValidationError("ApprovalRepository not configured")
     arguments_hash = hashlib.sha256(
         json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -346,28 +424,27 @@ async def _run_approval(
             action_id=action_id,
             run_id=run_id,
             node_id=node_def.id,
-            action=str(node_def.config.get("action", decision.action)),
+            action=action,
             tool_name=tool_name,
             canonical_arguments=arguments,
-            risk=str(node_def.config.get("risk", "sensitive")),
+            risk="sensitive",
             expires_at=datetime.now(UTC)
             + timedelta(seconds=int(node_def.config.get("expires_in", 3600))),
         ))
-    resume = interrupt({
-        "approval_id": approval.id,
-        "action_id": action_id,
-        "action": approval.action,
-        "tool_name": tool_name,
-        "arguments": arguments,
-        "arguments_hash": arguments_hash,
-    })
-    decision_value = str(resume.get("decision", "reject")) if isinstance(resume, dict) else str(resume)
-    existing = list(state.get("data", {}).get("approval_results", []))
-    return {"data": {"approval_results": [*existing, {
-        "approval_id": approval.id,
-        "action_id": action_id,
-        "decision": decision_value,
-    }]}}
+        resume = interrupt({
+            "approval_id": approval.id,
+            "action_id": action_id,
+            "action": approval.action,
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "arguments_hash": arguments_hash,
+        })
+    decision_value = (
+        str(resume.get("decision", ApprovalStatus.rejected.value))
+        if isinstance(resume, dict)
+        else str(resume)
+    )
+    return decision_value, approval.id, action_id
 
 
 def _decision_from_state(state: LangGraphState) -> SupervisorDecision:

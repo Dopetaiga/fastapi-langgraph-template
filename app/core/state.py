@@ -108,6 +108,13 @@ class RunStatus(StrEnum):
     cancelled = "cancelled"
 
 
+TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({
+    RunStatus.completed.value,
+    RunStatus.failed.value,
+    RunStatus.cancelled.value,
+})
+
+
 class Run(BaseModel):
     """Application-level run record."""
     id: str

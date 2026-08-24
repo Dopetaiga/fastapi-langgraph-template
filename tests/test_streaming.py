@@ -70,6 +70,20 @@ def test_stream_honors_last_event_id_header():
     assert repository.after_values == [0]
 
 
+def test_stream_tolerates_malformed_last_event_id():
+    repository = FakeRepository([
+        FakeEvent(0, "run.started", {}),
+        FakeEvent(1, "run.completed", {}),
+    ])
+    response = _client(repository).get(
+        "/runs/r1/stream?after_seq=-1",
+        headers={"Last-Event-ID": "not-a-number"},
+    )
+
+    assert response.status_code == 200
+    assert repository.after_values == [-1]
+
+
 def test_stream_unknown_run_is_404():
     response = _client(FakeRepository([], exists=False)).get("/runs/missing/stream")
     assert response.status_code == 404

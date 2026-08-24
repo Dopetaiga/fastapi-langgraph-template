@@ -34,9 +34,6 @@ def route_next(
         # conditional routing from supervisor decision
         if decision.action == "final":
             return None  # END
-        if decision.target:
-            return decision.target
-        # action="node" uses a node ref in target
         return decision.target
 
     # explicit edge routing

@@ -7,12 +7,17 @@ from types import SimpleNamespace
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.core.state import AgentState, SupervisorDecision
+from app.core.state import AgentState, ErrorCategory, NormalizedError, SupervisorDecision
 from app.graph.compiler import compile_graph
 from app.graph.langgraph_runtime import RuntimeDependencies, compile_langgraph
 from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
 from app.models_gateway import ModelRequest, ModelResult
-from app.services.errors import GraphValidationError, RunPausedError
+from app.services.errors import (
+    GraphValidationError,
+    ModelCallError,
+    RunCancelledError,
+    RunPausedError,
+)
 from app.services.events import EventEmitter
 from app.tools.builtin.calculator import CALCULATOR_TOOL, calculator
 from app.tools.registry import ToolRegistry
@@ -198,3 +203,125 @@ async def test_approval_interrupt_and_resume_returns_to_supervisor() -> None:
     assert result.data["approval_results"][0]["decision"] == "approved"
     assert result.data["final_response"] == "approved"
     assert repository.actions[0].canonical_arguments == {"value": "fixed"}
+
+
+class TestFailureNormalization:
+    @pytest.mark.asyncio
+    async def test_model_failure_raises_model_call_error(self) -> None:
+        gateway = FakeModelGateway(ModelResult(
+            error=NormalizedError(category=ErrorCategory.rate_limit, message="429", recoverable=True)
+        ))
+        program = compile_langgraph(
+            compile_graph(_definition()),
+            RuntimeDependencies(model_gateway=gateway, model_name="test", emitter=EventEmitter()),
+        )
+        with pytest.raises(ModelCallError, match="429") as exc_info:
+            await program.ainvoke(AgentState(messages=[]), run_id="run-err")
+        assert exc_info.value.category == ErrorCategory.rate_limit
+        assert exc_info.value.recoverable is True
+
+    @pytest.mark.asyncio
+    async def test_invalid_supervisor_structured_output_is_model_call_error(self) -> None:
+        gateway = FakeModelGateway(
+            ModelResult(content="draft"),
+            ModelResult(error=NormalizedError(category=ErrorCategory.provider_error, message="bad json")),
+        )
+        program = compile_langgraph(
+            compile_graph(_definition()),
+            RuntimeDependencies(model_gateway=gateway, model_name="test", emitter=EventEmitter()),
+        )
+        with pytest.raises(ModelCallError):
+            await program.ainvoke(AgentState(messages=[]), run_id="run-bad")
+
+
+class TestCancellationGuard:
+    @pytest.mark.asyncio
+    async def test_cancelled_run_stops_before_node(self) -> None:
+        gateway = FakeModelGateway(ModelResult(content="never reached"))
+        cancel_seen = []
+
+        async def cancel_check(run_id: str) -> bool:
+            cancel_seen.append(run_id)
+            return True
+
+        program = compile_langgraph(
+            compile_graph(_definition()),
+            RuntimeDependencies(
+                model_gateway=gateway,
+                model_name="test",
+                emitter=EventEmitter(),
+                cancel_check=cancel_check,
+            ),
+        )
+        with pytest.raises(RunCancelledError):
+            await program.ainvoke(AgentState(messages=[{"role": "user", "content": "x"}]), run_id="run-c")
+        assert cancel_seen == ["run-c"]
+        # the model was never called
+        assert gateway.requests == []
+
+
+class TestSensitiveToolApproval:
+    @pytest.mark.asyncio
+    async def test_sensitive_tool_pauses_and_resumes(self) -> None:
+        definition = AgentDefinition(
+            name="sensitive-tool",
+            nodes=[
+                NodeDef(type="supervisor", id="supervisor"),
+                NodeDef(type="tool", id="tools"),
+            ],
+            edges=[EdgeDef(source="supervisor", target="tools", condition="tool")],
+            entry="supervisor",
+        )
+
+        registry = ToolRegistry()
+        registry.register(CALCULATOR_TOOL)
+        registry.register_callable("calculator", calculator)
+
+        from app.tools.metadata import ToolDef, ToolRisk, ToolSource
+
+        registry.register(ToolDef(
+            name="deploy",
+            description="deploys to prod",
+            input_schema={"type": "object"},
+            risk=ToolRisk.sensitive,
+            source=ToolSource.builtin,
+        ))
+        registry.register_callable("deploy", lambda **kwargs: {"ok": True})
+
+        gateway = FakeModelGateway(
+            ModelResult(structured={
+                "action": "tool",
+                "capability_node_id": "tools",
+                "resource": {"tool_name": "deploy"},
+                "input": {"env": "prod"},
+            }),
+            ModelResult(structured={"action": "final", "final_response": "deployed"}),
+        )
+        repository = FakeApprovalRepository()
+        program = compile_langgraph(
+            compile_graph(definition),
+            RuntimeDependencies(
+                model_gateway=gateway,
+                model_name="test",
+                emitter=EventEmitter(),
+                tool_registry=registry,
+                approval_repository=repository,
+            ),
+            checkpointer=InMemorySaver(),
+        )
+
+        with pytest.raises(RunPausedError):
+            await program.ainvoke(
+                AgentState(messages=[{"role": "user", "content": "deploy"}]),
+                run_id="risky-run",
+                thread_id="risky-run",
+            )
+        assert repository.actions[0].tool_name == "deploy"
+
+        result = await program.aresume(
+            {"decision": "approved", "approval_id": "approval-1"},
+            run_id="risky-run",
+            thread_id="risky-run",
+        )
+        assert result.data["tool_results"][0]["success"] is True
+        assert result.data["final_response"] == "deployed"

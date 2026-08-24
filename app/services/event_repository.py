@@ -56,6 +56,17 @@ class RuntimeEventRepository:
             return list(result.scalars())
         raise RuntimeError("session generator exhausted")
 
+    async def has_event(self, run_id: str, type_value: str) -> bool:
+        """Return True if the run already persisted an event of the given type."""
+        async for session in get_session():
+            result = await session.execute(
+                select(RunEventModel.id)
+                .where(RunEventModel.run_id == run_id, RunEventModel.type == type_value)
+                .limit(1)
+            )
+            return result.scalar_one_or_none() is not None
+        raise RuntimeError("session generator exhausted")
+
     async def run_exists(self, run_id: str) -> bool:
         async for session in get_session():
             return await session.get(RunModel, run_id) is not None
