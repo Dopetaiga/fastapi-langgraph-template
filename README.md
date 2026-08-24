@@ -151,7 +151,7 @@ Tool/RAG/Subagent/Approval 由 Supervisor 调度后自动返回 Supervisor，因
 - HTTP 请求、外部 HTTP 调用和 SQLAlchemy 查询；
 - PostgreSQL Job 排队时间、Worker 执行结果、重试和 SSE 连接；
 - Agent Run、Graph Node、Supervisor 决策；
-- LLM/Embedding 延迟、错误、输入输出 token 与 LiteLLM 返回的成本；
+- LLM/Embedding 延迟、错误、输入输出 token 与 LiteLLM 返回的成本，`call_id` 贯穿重试与 fallback（`llm.requested/completed/fallback/failed/retrying` 事件）；
 - Tool、RAG、pgvector、Subagent、Approval、Mem0、Checkpoint 边界；
 - 带 `trace_id`、`span_id` 的 UTF-8 JSON 日志。
 

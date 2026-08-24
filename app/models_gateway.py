@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app.core.state import ErrorCategory, NormalizedError
-from app.observability.telemetry import record_llm_usage, traced_span
+from app.observability.telemetry import record_llm_outcome, record_llm_usage, traced_span
 
 
 class ModelRequest(BaseModel):
@@ -29,6 +29,8 @@ class ModelResult(BaseModel):
     content: str = ""
     structured: dict[str, Any] | None = None
     model: str | None = None
+    served_model: str | None = None
+    fallback: bool = False
     call_id: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     error: NormalizedError | None = None
@@ -98,9 +100,10 @@ class LiteLLMModelGateway:
                 "gen_ai.request.model": model,
                 "agent.run_id": request.metadata.get("run_id"),
                 "agent.node_id": request.metadata.get("node_id"),
+                "agent.node_type": request.metadata.get("node_type"),
                 "agent.call_id": request.call_id,
                 "agent.structured_output": request.response_schema is not None,
-            }):
+            }) as span:
                 kwargs: dict[str, Any] = {
                     "model": model,
                     "messages": request.messages,
@@ -118,6 +121,12 @@ class LiteLLMModelGateway:
                 if inspect.isawaitable(response):
                     response = await response
 
+                served_model = getattr(response, "model", None)
+                fallback = bool(served_model and model and served_model != model)
+                if served_model:
+                    span.set_attribute("gen_ai.response.model", str(served_model))
+                span.set_attribute("agent.fallback", fallback)
+
             choice = response.choices[0]
             content = choice.message.content or ""
             structured = None
@@ -131,15 +140,20 @@ class LiteLLMModelGateway:
             hidden = getattr(response, "_hidden_params", {}) or {}
             raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
             record_llm_usage(model, usage, raw_cost if isinstance(raw_cost, (int, float)) else None)
+            record_llm_outcome(model, outcome="ok", fallback=fallback)
             return ModelResult(
                 content=content,
                 structured=structured,
-                model=getattr(response, "model", None),
+                model=model,
+                served_model=served_model,
+                fallback=fallback,
                 call_id=request.call_id,
                 usage=usage,
             )
         except Exception as exc:
-            return ModelResult(call_id=request.call_id, error=_normalize_model_error(exc))
+            error = _normalize_model_error(exc)
+            record_llm_outcome(request.model or self._default_model, outcome="error")
+            return ModelResult(call_id=request.call_id, error=error)
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResult:
         try:

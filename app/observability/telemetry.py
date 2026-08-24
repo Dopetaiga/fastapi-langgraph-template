@@ -150,6 +150,38 @@ sse_connections = _meter.create_up_down_counter(
     "agent_runtime.sse.connections", description="Active SSE connections"
 )
 sse_events = _meter.create_counter("agent_runtime.sse.events", description="SSE events delivered")
+llm_calls = _meter.create_counter(
+    "agent_runtime.llm.calls",
+    description="LLM call outcomes (call-level, distinct from worker job outcomes)",
+)
+catalog_refreshes = _meter.create_counter(
+    "agent_runtime.model.catalog.refresh",
+    description="Model catalog refresh outcomes",
+)
+
+
+def record_llm_outcome(model: str, *, outcome: str, fallback: bool = False) -> None:
+    llm_calls.add(1, {
+        "gen_ai.request.model": model,
+        "outcome": outcome,
+        "fallback": fallback,
+    })
+
+
+def record_catalog_refresh(*, status: str, model_count: int) -> None:
+    catalog_refreshes.add(1, {"status": status})
+    if status == "fresh":
+        _catalog_models_gauge_note(model_count)
+
+
+def _catalog_models_gauge_note(count: int) -> None:
+    # Kept as a log-only observation; a gauge would need an observable
+    # callback and adds little for the demo dashboards.
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "model catalog refreshed",
+        extra={"event_type": "model.catalog.refreshed", "models": count},
+    )
 
 
 def record_operation(operation: str, duration_seconds: float, status: str, **dimensions: str) -> None:

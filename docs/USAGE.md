@@ -49,6 +49,31 @@ Worker 任务级重试                   ←  仅 transient 失败进入 retry_w
 确定性失败（fatal 模型错误、max_steps）不会消耗任务重试额度，直接落 failed 并
 发出唯一一条 `run.failed` 事件。
 
+### 模型链路事件与演示路径
+
+Run 级事件流（SSE / `GET /runs/{id}/events`）现在覆盖完整模型生命周期：
+
+```text
+model.resolved    创建时冻结的模型决策（requested/resolved/reason/catalog_version）
+llm.requested     每次调用前（model + call_id）
+llm.completed     成功返回；served_model 与 fallback 标志
+llm.fallback      代理组内降级服务（served_model != requested）
+llm.failed        调用级失败 + 归一化 category
+llm.retrying      Worker 任务级重试调度（scope=worker_job，与调用级区分）
+```
+
+四条面试演示路径：
+
+1. **成功**：`auto` 创建 Run → `model.resolved(reason=auto_default)` →
+   `llm.requested/completed` 同 call_id → Grafana LLM P95/Token/成本面板有数。
+2. **fallback**：LiteLLM 配置 fallback 组后制造上游故障 →
+   `llm.fallback(served_model=...)` 事件 + 指标 `fallback=true`。
+3. **无效模型**：`specific` 提交目录外 model_id → API 直接 422，
+   不产生 Run（目录校验前置）。
+4. **无密钥失败**：未配 Provider Key 时 → 调用级 `llm.failed(category=provider_error)`
+   → 任务级 `llm.retrying(scope=worker_job)` × N → 唯一 `run.failed` 终态；
+   Jaeger 中 `llm.call` span 为 ERROR，Grafana"调用级 vs 任务级"面板分层可见。
+
 ## 关键入口
 
 ```text

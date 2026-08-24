@@ -84,7 +84,9 @@ class TestWorkerQueueInterface:
                         mock_fail.assert_called_once()
 
         asyncio.run(run())
-        assert events.events == []
+        # a recoverable failure schedules a task-level retry event
+        assert [event.type.value for event in events.events] == ["llm.retrying"]
+        assert events.events[0].payload["scope"] == "worker_job"
 
     def test_run_once_awaits_async_handler(self):
         handled = []

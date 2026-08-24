@@ -7,6 +7,7 @@ types — never LiteLLM SDK objects or provider keys.
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Literal
@@ -14,7 +15,10 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, Field, model_validator
 
+from app.observability.telemetry import record_catalog_refresh
 from app.services.errors import ModelSelectionError
+
+logger = logging.getLogger(__name__)
 
 ModelTier = Literal["economy", "balanced", "performance"]
 
@@ -123,6 +127,11 @@ class ModelCatalogService:
             except Exception as exc:
                 if self._snapshot is not None:
                     # Serve the last good snapshot, clearly marked stale.
+                    logger.warning(
+                        "model catalog refresh failed; serving stale snapshot",
+                        extra={"event_type": "model.catalog.refreshed", "status": "stale"},
+                    )
+                    record_catalog_refresh(status="stale", model_count=len(self._snapshot.entries))
                     return self._snapshot.as_stale()
                 raise ModelSelectionError(
                     f"model catalog unavailable: {exc}",
@@ -130,6 +139,16 @@ class ModelCatalogService:
                 ) from exc
             self._snapshot = snapshot
             self._cached_at = time.monotonic()
+            logger.info(
+                "model catalog refreshed",
+                extra={
+                    "event_type": "model.catalog.refreshed",
+                    "status": "fresh",
+                    "catalog_version": snapshot.version,
+                    "models": len(snapshot.entries),
+                },
+            )
+            record_catalog_refresh(status="fresh", model_count=len(snapshot.entries))
             return snapshot
 
     async def _fetch(self) -> ModelCatalogSnapshot:

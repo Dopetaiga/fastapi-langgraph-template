@@ -21,9 +21,9 @@ class _FakeChoice:
 
 
 class _FakeResponse:
-    def __init__(self) -> None:
+    def __init__(self, model: str = "gpt-4o-mini") -> None:
         self.choices = [_FakeChoice()]
-        self.model = "gpt-4o-mini"
+        self.model = model
         self.usage = None
 
 
@@ -68,6 +68,32 @@ class TestCallBudget:
         ))
         assert captured[0]["metadata"]["call_id"] == "run-1:draft:deadbeef"
         assert result.call_id == "run-1:draft:deadbeef"
+
+    async def test_served_model_mismatch_marks_fallback(self, monkeypatch):
+        async def fake_acompletion(**_kwargs):
+            return _FakeResponse(model="agent-economy")
+
+        import litellm
+
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        gateway = LiteLLMModelGateway(api_base="x", api_key="k", default_model="m")
+        result = await gateway.complete(ModelRequest(
+            model="agent-performance",
+            messages=[{"role": "user", "content": "hi"}],
+            call_id="r:n:11111111",
+        ))
+        assert result.fallback is True
+        assert result.served_model == "agent-economy"
+        assert result.model == "agent-performance"
+
+    async def test_matching_served_model_is_not_fallback(self, captured):
+        gateway = LiteLLMModelGateway(api_base="x", api_key="k", default_model="m")
+        result = await gateway.complete(ModelRequest(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "hi"}],
+        ))
+        assert result.fallback is False
+        assert result.served_model == "gpt-4o-mini"
 
     async def test_error_result_keeps_call_id(self, monkeypatch):
         async def failing(**_kwargs):

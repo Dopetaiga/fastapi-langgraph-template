@@ -205,6 +205,62 @@ async def test_approval_interrupt_and_resume_returns_to_supervisor() -> None:
     assert repository.actions[0].canonical_arguments == {"value": "fixed"}
 
 
+class TestLLMLifecycleEvents:
+    @pytest.mark.asyncio
+    async def test_requested_and_completed_emitted_with_call_id(self) -> None:
+        gateway = FakeModelGateway(
+            ModelResult(content="draft"),
+            ModelResult(structured={"action": "final", "final_response": "done"}),
+        )
+        emitter = EventEmitter()
+        program = compile_langgraph(
+            compile_graph(_definition()),
+            RuntimeDependencies(model_gateway=gateway, model_name="test", emitter=emitter),
+        )
+        await program.ainvoke(AgentState(messages=[{"role": "user", "content": "hi"}]), run_id="run-ev")
+
+        types = [event.type.value for event in emitter.all_events()]
+        assert "llm.requested" in types and "llm.completed" in types
+        assert "llm.failed" not in types
+        requested = next(e for e in emitter.all_events() if e.type.value == "llm.requested")
+        completed = next(e for e in emitter.all_events() if e.type.value == "llm.completed")
+        assert requested.payload["model"] == "test"
+        assert completed.payload["call_id"] == requested.payload["call_id"]
+        assert completed.payload["call_id"].startswith("run-ev:draft:")
+        assert completed.payload["fallback"] is False
+
+    @pytest.mark.asyncio
+    async def test_failed_event_carries_category(self) -> None:
+        gateway = FakeModelGateway(ModelResult(
+            error=NormalizedError(category=ErrorCategory.rate_limit, message="429", recoverable=True)
+        ))
+        emitter = EventEmitter()
+        program = compile_langgraph(
+            compile_graph(_definition()),
+            RuntimeDependencies(model_gateway=gateway, model_name="test", emitter=emitter),
+        )
+        with pytest.raises(ModelCallError):
+            await program.ainvoke(AgentState(messages=[]), run_id="run-fail")
+        failed = next(e for e in emitter.all_events() if e.type.value == "llm.failed")
+        assert failed.payload["category"] == "rate_limit"
+
+    @pytest.mark.asyncio
+    async def test_fallback_result_emits_llm_fallback(self) -> None:
+        gateway = FakeModelGateway(
+            ModelResult(content="draft", model="requested-m", served_model="backup-m", fallback=True),
+            ModelResult(structured={"action": "final", "final_response": "done"}),
+        )
+        emitter = EventEmitter()
+        program = compile_langgraph(
+            compile_graph(_definition()),
+            RuntimeDependencies(model_gateway=gateway, model_name="requested-m", emitter=emitter),
+        )
+        await program.ainvoke(AgentState(messages=[{"role": "user", "content": "hi"}]), run_id="run-fb")
+        fallback = next(e for e in emitter.all_events() if e.type.value == "llm.fallback")
+        assert fallback.payload["served_model"] == "backup-m"
+        assert fallback.payload["fallback"] is True
+
+
 class TestFailureNormalization:
     @pytest.mark.asyncio
     async def test_model_failure_raises_model_call_error(self) -> None:

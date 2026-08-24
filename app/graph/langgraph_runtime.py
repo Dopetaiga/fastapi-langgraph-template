@@ -200,20 +200,48 @@ async def _run_llm(
     messages = list(state.get("messages", []))
     if node_def.prompt:
         messages = [{"role": "system", "content": node_def.prompt}, *messages]
+    model = node_def.config.get("model", deps.model_name)
+    call_id = _new_call_id(run_id, node_def.id)
+    deps.emitter.emit(EventType.llm_requested, run_id, node=node_def.id, payload={
+        "model": model, "call_id": call_id,
+    })
     result = await deps.model_gateway.complete(ModelRequest(
-        model=node_def.config.get("model", deps.model_name),
+        model=model,
         messages=messages,
-        call_id=_new_call_id(run_id, node_def.id),
-        metadata={"run_id": run_id, "node_id": node_def.id},
+        call_id=call_id,
+        metadata={"run_id": run_id, "node_id": node_def.id, "node_type": node_def.type},
     ))
     if not result.success:
         error = result.error
+        deps.emitter.emit(EventType.llm_failed, run_id, node=node_def.id, payload={
+            "model": model, "call_id": call_id,
+            "category": error.category.value if error else ErrorCategory.provider_error.value,
+        })
         raise ModelCallError(
             error.message if error else "model call failed",
             category=error.category if error else ErrorCategory.provider_error,
             recoverable=error.recoverable if error else True,
         )
+    _emit_llm_done(deps, run_id, node_def.id, model, call_id, result)
     return {"messages": [{"role": "assistant", "content": result.content}]}
+
+
+def _emit_llm_done(
+    deps: RuntimeDependencies,
+    run_id: str,
+    node_id: str,
+    model: str,
+    call_id: str,
+    result: Any,
+) -> None:
+    payload = {
+        "model": model,
+        "call_id": call_id,
+        "served_model": result.served_model,
+        "fallback": result.fallback,
+    }
+    event_type = EventType.llm_fallback if result.fallback else EventType.llm_completed
+    deps.emitter.emit(event_type, run_id, node=node_id, payload=payload)
 
 
 async def _run_supervisor(
@@ -225,24 +253,35 @@ async def _run_supervisor(
 ) -> dict[str, Any]:
     messages = list(state.get("messages", []))
     prompt = node_def.prompt or "Choose the next declared capability or return final."
+    model = node_def.config.get("model", deps.model_name)
+    call_id = _new_call_id(run_id, node_def.id)
     with traced_span("supervisor.decide", {
         "agent.run_id": run_id,
         "agent.node_id": node_def.id,
+        "agent.call_id": call_id,
     }):
+        deps.emitter.emit(EventType.llm_requested, run_id, node=node_def.id, payload={
+            "model": model, "call_id": call_id,
+        })
         result = await deps.model_gateway.complete(ModelRequest(
-            model=node_def.config.get("model", deps.model_name),
+            model=model,
             messages=[{"role": "system", "content": prompt}, *messages[-8:]],
             response_schema=SupervisorDecision,
-            call_id=_new_call_id(run_id, node_def.id),
-            metadata={"run_id": run_id, "node_id": node_def.id},
+            call_id=call_id,
+            metadata={"run_id": run_id, "node_id": node_def.id, "node_type": node_def.type},
         ))
     if not result.success or result.structured is None:
         error = result.error
+        deps.emitter.emit(EventType.llm_failed, run_id, node=node_def.id, payload={
+            "model": model, "call_id": call_id,
+            "category": error.category.value if error else ErrorCategory.validation_error.value,
+        })
         raise ModelCallError(
             error.message if error else "invalid supervisor response",
             category=error.category if error else ErrorCategory.validation_error,
             recoverable=False,
         )
+    _emit_llm_done(deps, run_id, node_def.id, model, call_id, result)
     decision = SupervisorDecision.model_validate(result.structured)
     _validate_decision(decision, compiled)
     patch: dict[str, Any] = {"control": {"supervisor_decision": decision.model_dump()}}

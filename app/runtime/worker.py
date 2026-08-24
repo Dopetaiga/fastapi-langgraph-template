@@ -228,6 +228,18 @@ class WorkerQueue:
             )
             if attempts_exhausted:
                 await self._emit_run_failed(job.run_id, str(exc), job.attempt_count)
+            else:
+                # Task-level retry visibility: distinct from call-level llm.failed.
+                await self._event_repository.append_many(job.run_id, [RuntimeEvent(
+                    seq=0,
+                    type=EventType.llm_retrying,
+                    run_id=job.run_id,
+                    payload={
+                        "scope": "worker_job",
+                        "attempt": job.attempt_count,
+                        "retry_in_seconds": self.retry_delay_seconds,
+                    },
+                )])
         finally:
             otel_context.detach(token)
         return True
