@@ -20,7 +20,7 @@ from app.db.engine import get_session
 from app.graph.compiler import compile_graph
 from app.graph.langgraph_runtime import RuntimeDependencies, compile_langgraph
 from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
-from app.models.db import JobModel, RunEventModel, RunModel, SessionModel
+from app.models.db import ApprovalModel, JobModel, RunEventModel, RunModel, SessionModel
 from app.models_gateway import EmbeddingRequest, EmbeddingResult, ModelRequest, ModelResult
 from app.runtime.checkpoints import postgres_checkpointer
 from app.runtime.run_manager import RunManager
@@ -303,7 +303,21 @@ async def _seed_run_with_job(
         break
 
 
+async def _purge_queue() -> None:
+    """Wipe queue rows so leftover claimable jobs cannot cross contaminate
+    claiming tests (earlier tests legitimately leave retryable jobs behind)."""
+    async for session in get_session():
+        await session.execute(delete(RunEventModel))
+        await session.execute(delete(ApprovalModel))
+        await session.execute(delete(JobModel))
+        await session.execute(delete(RunModel))
+        await session.execute(delete(SessionModel))
+        await session.commit()
+        break
+
+
 async def test_stale_lease_is_reclaimable() -> None:
+    await _purge_queue()
     identity = str(uuid.uuid4())
     session_id = f"lease-session-{identity}"
     run_id = f"lease-run-{identity}"
@@ -360,6 +374,7 @@ async def test_cancelled_run_survives_late_worker_completion() -> None:
 
 
 async def test_two_workers_claim_distinct_jobs() -> None:
+    await _purge_queue()
     identity = str(uuid.uuid4())
     session_id = f"contend-session-{identity}"
     run_ids = [f"contend-run-{identity}-1", f"contend-run-{identity}-2"]
