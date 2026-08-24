@@ -8,12 +8,32 @@
 | 领域 | 路径 |
 |---|---|
 | Health | `GET /health`, `POST /model/smoke-test` |
+| Models | `GET /models` |
 | Graph | `GET /graphs`, `GET /graphs/{name}`, `POST /graphs/validate` |
 | Run | `POST /runs`, `GET /runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel` |
 | Event | `GET /runs/{id}/events`, `GET /runs/{id}/stream` |
 | Approval | `GET /approvals/run/{id}`, `POST /approvals/{id}/approve|reject` |
 | RAG | `POST /knowledge-bases`, `POST /knowledge-bases/{id}/documents|search` |
 | Memory | `POST /memory/{user}`, `POST /memory/{user}/search`, `GET /memory/{user}` |
+
+## 模型策略（Run 级冻结）
+
+`POST /runs` 可携带 `model_policy`，创建时一次性确定性解析并冻结进
+`runs.model_decision`；恢复与重试沿用冻结结果，不因目录变化换模型：
+
+```json
+{"model_policy": {"mode": "specific", "model_id": "gpt-4o-mini"}}
+{"model_policy": {"mode": "tier", "tier": "performance"}}
+{"model_policy": {"mode": "auto"}}
+```
+
+- `specific`：必须命中目录中的可选模型（embedding 模型被过滤）；
+- `tier`：按 `MODEL_TIER_MAP`（env JSON）映射到 LiteLLM 逻辑模型名；
+- `auto`：V1 固定解析为 balanced 档，不做 LLM 路由。
+
+`GET /models` 返回服务端目录视图（catalog_version、stale 标记、能力声明），
+前端不接触 LiteLLM 凭据。决策快照含 requested/resolved/reason/catalog_version，
+配合 `model.resolved` 事件可完整解释一次 Run 的模型选择。
 
 ## 关键入口
 

@@ -34,6 +34,18 @@ class JobLeaseLostError(AppError):
     """Raised when a worker loses its job lease and must abort the handler."""
 
 
+class ModelSelectionError(AppError):
+    """Raised when a model policy cannot be resolved against the catalog.
+
+    http_status distinguishes caller mistakes (422) from catalog
+    unavailability (503).
+    """
+
+    def __init__(self, message: str, *, http_status: int = 422) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
 
 class ToolNotFoundError(AppError):
     """Raised when a tool is not in the registry."""

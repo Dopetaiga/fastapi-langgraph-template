@@ -7,8 +7,9 @@ from pydantic import BaseModel
 from app.core.state import EventType, RunStatus, RuntimeEvent
 from app.models.db import RunModel
 from app.runtime.run_manager import RunManager
-from app.services.errors import GraphValidationError
+from app.services.errors import GraphValidationError, ModelSelectionError
 from app.services.event_repository import RuntimeEventRepository
+from app.services.model_catalog import ModelPolicy
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -27,6 +28,7 @@ class CreateRunRequest(BaseModel):
     session_id: str
     graph_name: str = "default"
     input_text: str
+    model_policy: ModelPolicy | None = None
 
 
 class RunResponse(BaseModel):
@@ -58,11 +60,13 @@ def _response(run: RunModel) -> RunResponse:
 @router.post("", response_model=RunResponse)
 async def create_run(req: CreateRunRequest, manager: RunManager = Depends(get_run_manager)):
     try:
-        run = await manager.create_run(req.session_id, req.graph_name, req.input_text)
+        run = await manager.create_run(req.session_id, req.graph_name, req.input_text, req.model_policy)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except GraphValidationError as exc:
         raise HTTPException(status_code=422, detail=f"invalid graph: {exc}") from exc
+    except ModelSelectionError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
     return _response(run)
 
 

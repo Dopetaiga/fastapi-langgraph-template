@@ -22,6 +22,7 @@ from app.core.state import (
     ErrorCategory,
     EventType,
     RunStatus,
+    RuntimeEvent,
 )
 from app.db.engine import get_session
 from app.graph.compiler import CompiledGraph, compile_graph
@@ -33,9 +34,19 @@ from app.models_gateway import LiteLLMModelGateway, ModelGateway
 from app.observability.telemetry import traced_span
 from app.runtime.checkpoints import postgres_checkpointer
 from app.services.approval_repository import ApprovalRepository
-from app.services.errors import ModelCallError, RunCancelledError, RunPausedError
+from app.services.errors import (
+    ModelCallError,
+    RunCancelledError,
+    RunPausedError,
+)
 from app.services.event_repository import RuntimeEventRepository
 from app.services.events import DurableEventEmitter, EventEmitter
+from app.services.model_catalog import (
+    ModelCatalogService,
+    ModelDecision,
+    ModelPolicy,
+    resolve_model_policy,
+)
 from app.services.rag_repository import PostgresRAGRepository
 from app.tools.registry import ToolRegistry
 
@@ -53,6 +64,7 @@ class RunManager:
         event_repository: RuntimeEventRepository | None = None,
         approval_repository: ApprovalRepository | None = None,
         use_postgres_checkpointer: bool = True,
+        model_catalog: ModelCatalogService | None = None,
     ) -> None:
         self._graphs_dir = graphs_dir
         self._graphs: dict[str, CompiledGraph] = {}
@@ -60,6 +72,11 @@ class RunManager:
             api_base=settings.litellm_api_base,
             api_key=settings.litellm_api_key,
             default_model=settings.model_name,
+        )
+        self._model_catalog = model_catalog or ModelCatalogService(
+            api_base=settings.litellm_api_base,
+            api_key=settings.litellm_api_key,
+            ttl_seconds=settings.model_catalog_ttl_seconds,
         )
         self._retriever = retriever or PostgresRAGRepository(self._model_gateway)
         self._tool_registry = tool_registry or self._default_tool_registry()
@@ -85,10 +102,23 @@ class RunManager:
         self._graphs[name] = compiled
         return compiled
 
-    async def create_run(self, session_id: str, graph_name: str, input_text: str) -> RunModel:
+    async def resolve_model_decision(self, model_policy: ModelPolicy | None) -> ModelDecision:
+        """Resolve the run-level model choice once, deterministically."""
+        policy = model_policy or ModelPolicy(mode="auto")
+        snapshot = await self._model_catalog.get_snapshot()
+        return resolve_model_policy(policy, snapshot, settings.model_tier_map)
+
+    async def create_run(
+        self,
+        session_id: str,
+        graph_name: str,
+        input_text: str,
+        model_policy: ModelPolicy | None = None,
+    ) -> RunModel:
         run_id = str(uuid.uuid4())
         compiled = self.load_graph(graph_name)
         self._ensure_runtime_compilable(compiled)
+        decision = await self.resolve_model_decision(model_policy)
         snapshot = compiled.definition.model_dump(mode="json")
         definition_hash = hashlib.sha256(
             json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -110,6 +140,7 @@ class RunManager:
                 graph_version="1",
                 graph_definition_hash=definition_hash,
                 graph_snapshot=snapshot,
+                model_decision=decision.model_dump(mode="json"),
                 input_text=input_text,
             )
             session.add(run)
@@ -125,6 +156,17 @@ class RunManager:
                 trace_context=trace_context,
             ))
             await session.commit()
+            await self._event_repository.append_many(run_id, [RuntimeEvent(
+                seq=0,
+                type=EventType.model_resolved,
+                run_id=run_id,
+                payload={
+                    "requested": decision.requested,
+                    "resolved_model": decision.resolved_model,
+                    "reason": decision.reason,
+                    "catalog_version": decision.catalog_version,
+                },
+            )])
             await session.refresh(run)
             return run
         raise RuntimeError("session generator exhausted")
@@ -143,11 +185,14 @@ class RunManager:
         compiled: CompiledGraph | None = None
         resume_value: dict[str, Any] | None = None
         run_paused_without_approval = False
+        db_run_model_decision: dict[str, Any] = {}
         async for session in get_session():
             result = await session.execute(select(RunModel).where(RunModel.id == run_id))
             db_run = result.scalar_one_or_none()
             if db_run is None:
                 raise RuntimeError(f"run not found: {run_id}")
+            if isinstance(db_run.model_decision, dict):
+                db_run_model_decision = db_run.model_decision
             if db_run.status == RunStatus.paused.value:
                 # Never re-invoke a paused thread without its resolved approval:
                 # the checkpoint would treat the input as new state and duplicate
@@ -182,9 +227,13 @@ class RunManager:
             raise RuntimeError("session generator exhausted")
 
         emitter = DurableEventEmitter(self._event_repository)
+        # The frozen decision wins over settings: resume and retry keep using
+        # the model resolved at creation time, even if the catalog changed.
+        frozen_decision = db_run_model_decision or {}
+        resolved_model = frozen_decision.get("resolved_model") or settings.model_name
         dependencies = RuntimeDependencies(
             model_gateway=self._model_gateway,
-            model_name=settings.model_name,
+            model_name=resolved_model,
             emitter=emitter,
             tool_registry=self._tool_registry,
             retriever=self._retriever,

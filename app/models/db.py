@@ -35,6 +35,7 @@ class RunModel(Base):
     graph_version = Column(String, nullable=False, default="1")
     graph_definition_hash = Column(String, nullable=True)
     graph_snapshot = Column(JSONB, nullable=True)
+    model_decision = Column(JSONB, nullable=True)
     input_text = Column(Text)
     output_text = Column(Text, nullable=True)
     error = Column(Text, nullable=True)

@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     mcp_endpoints: list[str] = Field(default_factory=list)
     openapi_urls: list[str] = Field(default_factory=list)
 
+    # Model selection (docs/MODEL_SELECTION_INTERNSHIP_PLAN.md)
+    # Tier -> logical LiteLLM model_name mapping; overridable via env JSON.
+    model_tier_map: dict[str, str] = Field(default_factory=lambda: {
+        "economy": "gpt-4o-mini",
+        "balanced": "gpt-4o-mini",
+        "performance": "claude-3-5-haiku-latest",
+    })
+    model_catalog_ttl_seconds: int = 30
+
     # OpenTelemetry
     otel_enabled: bool = False
     otel_service_name: str = "agent-runtime"

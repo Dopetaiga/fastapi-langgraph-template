@@ -71,6 +71,7 @@ class SupervisorDecision(BaseModel):
 class EventType(StrEnum):
     run_started = "run.started"
     run_attempt_failed = "run.attempt_failed"
+    model_resolved = "model.resolved"
     node_started = "node.started"
     node_completed = "node.completed"
     llm_token = "llm.token"

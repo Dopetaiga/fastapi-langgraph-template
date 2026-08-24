@@ -29,6 +29,7 @@ from app.services.approval_repository import ApprovalRepository
 from app.services.errors import RunPausedError
 from app.services.event_repository import RuntimeEventRepository
 from app.services.events import EventEmitter
+from app.services.model_catalog import ModelPolicy
 from app.services.rag_repository import PostgresRAGRepository
 
 pytestmark = [
@@ -370,3 +371,78 @@ async def test_two_workers_claim_distinct_jobs() -> None:
     assert claimed_a is not None and claimed_b is not None
     assert {claimed_a.id, claimed_b.id} == set(job_ids)
     assert claimed_a.lease_owner != claimed_b.lease_owner
+
+
+class StaticCatalog:
+    """Deterministic catalog double for RunManager injection."""
+
+    def __init__(self, model_id: str) -> None:
+        from app.services.model_catalog import build_snapshot
+
+        self._snapshot = build_snapshot([model_id])
+
+    async def get_snapshot(self):
+        return self._snapshot
+
+
+async def test_create_run_freezes_model_decision_and_event() -> None:
+    identity = str(uuid.uuid4())
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    manager._model_catalog = StaticCatalog("gpt-4o-mini")
+
+    run = await manager.create_run(
+        f"policy-session-{identity}",
+        "default",
+        "hello",
+        ModelPolicy(mode="specific", model_id="gpt-4o-mini"),
+    )
+
+    assert run.model_decision is not None
+    assert run.model_decision["resolved_model"] == "gpt-4o-mini"
+    assert run.model_decision["reason"] == "user_selected"
+    assert run.model_decision["catalog_version"]
+
+    events = await RuntimeEventRepository().list_after(run.id)
+    resolved = [event for event in events if event.type == EventType.model_resolved.value]
+    assert len(resolved) == 1
+    assert resolved[0].payload["resolved_model"] == "gpt-4o-mini"
+
+    async for session in get_session():
+        db_run = await session.get(RunModel, run.id)
+        assert db_run.model_decision["resolved_model"] == "gpt-4o-mini"
+        break
+
+
+async def test_execute_uses_frozen_model_over_settings() -> None:
+    identity = str(uuid.uuid4())
+    session_id = f"frozen-session-{identity}"
+    run_id = f"frozen-run-{identity}"
+    await _seed_run_with_job(session_id=session_id, run_id=run_id, run_status="running")
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        run.model_decision = {
+            "requested": {"mode": "specific", "model_id": "frozen-model", "tier": None},
+            "resolved_model": "frozen-model",
+            "resolved_tier": None,
+            "reason": "user_selected",
+            "catalog_version": "test",
+            "resolved_at": datetime.now(UTC).isoformat(),
+        }
+        await session.commit()
+        break
+
+    captured: dict = {}
+
+    class CapturingGateway:
+        async def complete(self, request):
+            captured["model"] = request.model
+            from app.models_gateway import ModelResult
+
+            return ModelResult(structured={"action": "final", "final_response": "done"})
+
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    manager._model_gateway = CapturingGateway()
+    result = await manager.execute_run_sync(run_id, "hello")
+
+    assert result["status"] == RunStatus.completed
+    assert captured["model"] == "frozen-model"
