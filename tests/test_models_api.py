@@ -48,3 +48,32 @@ def test_models_endpoint_marks_stale_catalog():
     body = response.json()
     assert body["stale"] is True
     assert all(model["availability"] == "stale" for model in body["models"])
+
+
+class TestRunResponseModelDecision:
+    def _response_of(self, model_decision):
+        from types import SimpleNamespace
+
+        from app.api.runs import _response
+
+        run = SimpleNamespace(
+            id="run-1",
+            status="queued",
+            graph_name="default",
+            input_text="hi",
+            output_text=None,
+            error=None,
+            termination_reason=None,
+            created_at=None,
+            updated_at=None,
+            model_decision=model_decision,
+        )
+        return _response(run)
+
+    def test_model_decision_passthrough(self):
+        decision = {"resolved_model": "gpt-4o-mini", "reason": "auto_default"}
+        response = self._response_of(decision)
+        assert response.model_decision == decision
+
+    def test_model_decision_defaults_to_none(self):
+        assert self._response_of(None).model_decision is None

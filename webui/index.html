@@ -86,6 +86,14 @@
     <form method="dialog" id="run-form"><div class="dialog-head"><div><p class="kicker">QUEUE A DURABLE RUN</p><h2>新建 Run</h2></div><button value="cancel" class="icon-button" aria-label="关闭">×</button></div>
       <label>Session ID<input name="session_id" required value="demo-session"></label>
       <label>执行图<select name="graph_name" id="run-graph-select"></select></label>
+      <fieldset class="policy-block"><legend>模型策略</legend>
+        <div class="policy-row">
+          <label>模式<select name="policy_mode" id="policy-mode"><option value="auto">自动 · auto</option><option value="tier">档位 · tier</option><option value="specific">指定模型</option></select></label>
+          <label id="policy-tier-wrap" hidden>档位<select name="policy_tier"><option value="economy">economy · 经济</option><option value="balanced" selected>balanced · 均衡</option><option value="performance">performance · 高性能</option></select></label>
+          <label id="policy-model-wrap" hidden>模型<select name="policy_model" id="policy-model"></select></label>
+        </div>
+        <small id="policy-hint" class="form-note">创建时解析并冻结进 Run，恢复与重试沿用同一模型。</small>
+      </fieldset>
       <label>用户请求<textarea name="input_text" rows="5" required placeholder="分析这个运行时架构，并给出改进建议。"></textarea></label>
       <p class="form-note">创建后由独立 PostgreSQL worker 异步领取，不在 API 请求内执行。</p>
       <div class="dialog-actions"><button value="cancel" class="quiet">取消</button><button value="default" class="primary" id="queue-run">加入队列</button></div>

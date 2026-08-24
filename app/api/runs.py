@@ -41,6 +41,7 @@ class RunResponse(BaseModel):
     termination_reason: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    model_decision: dict | None = None
 
 
 def _response(run: RunModel) -> RunResponse:
@@ -54,6 +55,7 @@ def _response(run: RunModel) -> RunResponse:
         termination_reason=run.termination_reason,
         created_at=run.created_at.isoformat() if run.created_at else None,
         updated_at=run.updated_at.isoformat() if run.updated_at else None,
+        model_decision=run.model_decision,
     )
 
 

@@ -1,9 +1,9 @@
 const API = '';
-const EVENT_TYPES = ['run.started','run.attempt_failed','node.started','node.completed','tool.started','tool.completed','rag.started','rag.completed','subagent.started','subagent.completed','approval.required','checkpoint.created','run.completed','run.failed','run.cancelled'];
+const EVENT_TYPES = ['model.resolved','run.started','run.attempt_failed','node.started','node.completed','tool.started','tool.completed','rag.started','rag.completed','subagent.started','subagent.completed','approval.required','checkpoint.created','run.completed','run.failed','run.cancelled'];
 const titles = {runs:'运行工作台',approvals:'人工审批',knowledge:'知识检索',memory:'长期记忆',graph:'图结构'};
 
 const app = {
-  runs: [], currentRun: null, source: null, graphs: [],
+  runs: [], currentRun: null, source: null, graphs: [], models: [],
 
   async init() {
     document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => this.navigate(button.dataset.page)));
@@ -18,10 +18,12 @@ const app = {
     document.querySelector('#memory-add-form').addEventListener('submit', event => this.addMemory(event));
     document.querySelector('#memory-search-form').addEventListener('submit', event => this.searchMemory(event));
     document.querySelector('#graph-select').addEventListener('change', event => this.loadGraph(event.target.value));
+    document.querySelector('#policy-mode').addEventListener('change', event => this.togglePolicyMode(event.target.value));
+    document.querySelector('#policy-model').addEventListener('change', () => this.updatePolicyHint());
     document.addEventListener('keydown', event => {
       if (event.key.toLowerCase() === 'n' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) document.querySelector('#run-dialog').showModal();
     });
-    await Promise.all([this.checkHealth(), this.loadGraphs(), this.loadRuns()]);
+    await Promise.all([this.checkHealth(), this.loadGraphs(), this.loadRuns(), this.loadModels()]);
   },
 
   navigate(page) {
@@ -49,6 +51,33 @@ const app = {
       const data = await this.request('/graphs'); this.graphs = data.graphs;
       ['#run-graph-select','#graph-select'].forEach(selector => document.querySelector(selector).innerHTML = this.graphs.map(name => `<option>${this.escape(name)}</option>`).join(''));
     } catch (error) { this.toast(`图目录读取失败：${error.message}`, true); }
+  },
+
+  togglePolicyMode(mode) {
+    document.querySelector('#policy-tier-wrap').hidden = mode !== 'tier';
+    document.querySelector('#policy-model-wrap').hidden = mode !== 'specific';
+    if (mode === 'specific') this.updatePolicyHint();
+  },
+
+  async loadModels() {
+    try {
+      const data = await this.request('/models'); this.models = data.models;
+      const select = document.querySelector('#policy-model');
+      select.innerHTML = this.models.map(model => `<option value="${this.escape(model.catalog_id)}">${this.escape(model.display_name)}</option>`).join('');
+      const hint = document.querySelector('#policy-hint');
+      if (data.stale) { hint.textContent = '模型目录已过期（stale），以下选择可能不可用。'; hint.classList.add('warn'); }
+      else { hint.classList.remove('warn'); this.updatePolicyHint(); }
+    } catch {
+      const hint = document.querySelector('#policy-hint');
+      hint.textContent = '模型目录不可用（LiteLLM 未启动？），仍可用 auto 策略创建。'; hint.classList.add('warn');
+    }
+  },
+
+  updatePolicyHint() {
+    const model = this.models.find(entry => entry.catalog_id === document.querySelector('#policy-model').value);
+    document.querySelector('#policy-hint').textContent = model
+      ? `${model.catalog_id} · 能力：${model.capabilities.join(' / ')} · 创建时冻结，恢复与重试沿用同一模型`
+      : '创建时解析并冻结进 Run，恢复与重试沿用同一模型。';
   },
 
   async loadRuns(selectId = null) {
@@ -80,8 +109,12 @@ const app = {
     const form = event.currentTarget; const submitter = event.submitter;
     if (submitter?.value === 'cancel') { document.querySelector('#run-dialog').close(); return; }
     const data = Object.fromEntries(new FormData(form));
+    const body = { session_id: data.session_id, graph_name: data.graph_name, input_text: data.input_text };
+    if (data.policy_mode === 'specific') body.model_policy = { mode: 'specific', model_id: data.policy_model };
+    else if (data.policy_mode === 'tier') body.model_policy = { mode: 'tier', tier: data.policy_tier };
+    else body.model_policy = { mode: 'auto' };
     try {
-      const run = await this.request('/runs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+      const run = await this.request('/runs', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       document.querySelector('#run-dialog').close(); this.toast('Run 已加入 PostgreSQL 队列'); this.navigate('runs'); await this.loadRuns(run.run_id); this.showRun(run.run_id);
     } catch (error) { this.toast(`创建失败：${error.message}`, true); }
   },
@@ -91,7 +124,13 @@ const app = {
       const run = await this.request(`/runs/${encodeURIComponent(runId)}`); this.currentRun = run; this.renderRunList();
       document.querySelector('#run-detail-empty').hidden = true; document.querySelector('#run-detail').hidden = false;
       document.querySelector('#detail-title').textContent = `Run ${run.run_id.slice(0,8)}`;
-      document.querySelector('#run-facts').innerHTML = [['状态',run.status],['图',run.graph_name],['Session 输入',run.input_text],['终止原因',run.termination_reason || '—']].map(([k,v]) => `<div><dt>${this.escape(k)}</dt><dd>${this.escape(v)}</dd></div>`).join('');
+      const facts = [['状态',run.status],['图',run.graph_name],['Session 输入',run.input_text],['终止原因',run.termination_reason || '—']];
+      if (run.model_decision) {
+        const decision = run.model_decision;
+        facts.push(['模型', `${decision.resolved_model}${decision.resolved_tier ? ` (${decision.resolved_tier})` : ''}`]);
+        facts.push(['选择依据', `${decision.reason} · 目录 ${String(decision.catalog_version).slice(0,8)}`]);
+      }
+      document.querySelector('#run-facts').innerHTML = facts.map(([k,v]) => `<div><dt>${this.escape(k)}</dt><dd>${this.escape(v)}</dd></div>`).join('');
       document.querySelector('#run-output').textContent = run.output_text || (run.error ? `ERROR · ${run.error}` : '等待 Supervisor 完成…');
       document.querySelector('#cancel-run').hidden = ['completed','failed','cancelled'].includes(run.status);
       if (reconnect) this.connectEvents(runId);
