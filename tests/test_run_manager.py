@@ -56,3 +56,18 @@ class TestFailureClassification:
         status, reason, _ = RunManager._classify_failure(ValueError("boom"))
         assert status == RunStatus.failed
         assert reason == "error"
+
+
+class TestJobRetryClassification:
+    @pytest.mark.parametrize("reason,retryable", [
+        ("model_error:recoverable", True),
+        ("error", True),
+        ("model_error", False),
+        ("model_error:fatal", False),
+        ("max_steps", False),
+        ("cancelled", False),
+        ("supervisor_final", False),
+        (None, False),
+    ])
+    def test_only_transient_reasons_retry(self, reason, retryable):
+        assert RunManager.execution_is_retryable(reason) is retryable

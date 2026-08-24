@@ -19,6 +19,9 @@ class ModelRequest(BaseModel):
     messages: list[dict[str, Any]]
     temperature: float = 0.0
     response_schema: type[BaseModel] | None = Field(default=None, exclude=True)
+    # Stable per-invocation identifier correlating retries across logs,
+    # spans, and events: "<run_id>:<node_id>:<nonce>".
+    call_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -26,6 +29,7 @@ class ModelResult(BaseModel):
     content: str = ""
     structured: dict[str, Any] | None = None
     model: str | None = None
+    call_id: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     error: NormalizedError | None = None
 
@@ -59,22 +63,42 @@ class ModelGateway(Protocol):
 
 
 class LiteLLMModelGateway:
-    """The single V1 ModelGateway implementation."""
+    """The single V1 ModelGateway implementation.
 
-    def __init__(self, *, api_base: str, api_key: str, default_model: str) -> None:
+    Client-side budget is explicit and bounded: at most `num_retries` extra
+    HTTP attempts per call within `request_timeout`. Combined with the worker
+    job budget (max_attempts) this keeps worst-case model calls finite and
+    explainable — see docs/MODEL_SELECTION_INTERNSHIP_PLAN.md section 6.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        default_model: str,
+        num_retries: int = 1,
+        request_timeout: float = 60.0,
+    ) -> None:
         self._api_base = api_base
         self._api_key = api_key
         self._default_model = default_model
+        self._num_retries = num_retries
+        self._request_timeout = request_timeout
 
     async def complete(self, request: ModelRequest) -> ModelResult:
         try:
             from litellm import acompletion
 
             model = request.model or self._default_model
+            metadata = dict(request.metadata)
+            if request.call_id:
+                metadata.setdefault("call_id", request.call_id)
             with traced_span("llm.call", {
                 "gen_ai.request.model": model,
                 "agent.run_id": request.metadata.get("run_id"),
                 "agent.node_id": request.metadata.get("node_id"),
+                "agent.call_id": request.call_id,
                 "agent.structured_output": request.response_schema is not None,
             }):
                 kwargs: dict[str, Any] = {
@@ -83,7 +107,9 @@ class LiteLLMModelGateway:
                     "temperature": request.temperature,
                     "api_base": self._api_base,
                     "api_key": self._api_key,
-                    "metadata": request.metadata,
+                    "metadata": metadata,
+                    "num_retries": self._num_retries,
+                    "timeout": self._request_timeout,
                 }
                 if request.response_schema is not None:
                     kwargs["response_format"] = request.response_schema
@@ -109,10 +135,11 @@ class LiteLLMModelGateway:
                 content=content,
                 structured=structured,
                 model=getattr(response, "model", None),
+                call_id=request.call_id,
                 usage=usage,
             )
         except Exception as exc:
-            return ModelResult(error=_normalize_model_error(exc))
+            return ModelResult(call_id=request.call_id, error=_normalize_model_error(exc))
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResult:
         try:

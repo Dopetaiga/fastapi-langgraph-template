@@ -34,6 +34,10 @@ class JobLeaseLostError(AppError):
     """Raised when a worker loses its job lease and must abort the handler."""
 
 
+class JobNotRetryable(AppError):
+    """Raised when a job failed deterministically and retrying cannot help."""
+
+
 class ModelSelectionError(AppError):
     """Raised when a model policy cannot be resolved against the catalog.
 

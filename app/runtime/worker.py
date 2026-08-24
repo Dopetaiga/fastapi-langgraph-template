@@ -16,7 +16,7 @@ from app.core.state import TERMINAL_RUN_STATUSES, EventType, RunStatus, RuntimeE
 from app.db.engine import get_session
 from app.models.db import JobModel, RunModel
 from app.observability.telemetry import traced_span, worker_jobs, worker_queue_delay
-from app.services.errors import JobLeaseLostError
+from app.services.errors import JobLeaseLostError, JobNotRetryable
 from app.services.event_repository import RuntimeEventRepository
 
 logger = logging.getLogger(__name__)
@@ -211,6 +211,12 @@ class WorkerQueue:
             # Another worker owns the job now; it drives the outcome.
             worker_jobs.add(1, {"status": "lease_lost"})
             logger.warning("job %s lease lost; aborting handler", job.id)
+        except JobNotRetryable as exc:
+            # Deterministic failure: retrying would reproduce it identically.
+            worker_jobs.add(1, {"status": "failed"})
+            await self._fail_without_retry(job.id, str(exc))
+            await self._set_run_status(job.run_id, RunStatus.failed, error=str(exc))
+            await self._emit_run_failed(job.run_id, str(exc), job.attempt_count)
         except Exception as exc:
             worker_jobs.add(1, {"status": "failed"})
             await self.fail(job.id, str(exc))
@@ -221,15 +227,36 @@ class WorkerQueue:
                 error=str(exc),
             )
             if attempts_exhausted:
-                await self._event_repository.append_many(job.run_id, [RuntimeEvent(
-                    seq=0,
-                    type=EventType.run_failed,
-                    run_id=job.run_id,
-                    payload={"error": str(exc), "attempts": job.attempt_count},
-                )])
+                await self._emit_run_failed(job.run_id, str(exc), job.attempt_count)
         finally:
             otel_context.detach(token)
         return True
+
+    async def _fail_without_retry(self, job_id: str, error: str) -> None:
+        async for session in get_session():
+            stmt = (
+                update(JobModel)
+                .where(JobModel.id == job_id, JobModel.lease_owner == self.worker_id)
+                .values(
+                    status="failed",
+                    error=error,
+                    finished_at=datetime.now(UTC),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+            )
+            await session.execute(stmt)
+            await session.commit()
+            return
+        raise RuntimeError("session generator exhausted")
+
+    async def _emit_run_failed(self, run_id: str, error: str, attempts: int | None) -> None:
+        await self._event_repository.append_many(run_id, [RuntimeEvent(
+            seq=0,
+            type=EventType.run_failed,
+            run_id=run_id,
+            payload={"error": error, "attempts": attempts},
+        )])
 
     async def _invoke_handler(self, job: JobModel):
         handler_result = self._handler(job)

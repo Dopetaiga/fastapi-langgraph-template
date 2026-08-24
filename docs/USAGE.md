@@ -35,6 +35,20 @@
 前端不接触 LiteLLM 凭据。决策快照含 requested/resolved/reason/catalog_version，
 配合 `model.resolved` 事件可完整解释一次 Run 的模型选择。
 
+### 调用预算与错误分类
+
+每次模型调用携带稳定 `call_id`（`run_id:node_id:nonce`），贯穿 span、metadata
+与 `ModelResult`，重试可关联、重复调用可解释。重试分层且全部有界：
+
+```text
+LiteLLM Proxy 短重试/组内 fallback  ←  scripts/litellm_config_fallback.example.yaml
+ModelGateway 客户端预算             ←  MODEL_CALL_NUM_RETRIES(默认1) / MODEL_CALL_TIMEOUT_SECONDS(默认60)
+Worker 任务级重试                   ←  仅 transient 失败进入 retry_wait；确定性失败立即终态
+```
+
+确定性失败（fatal 模型错误、max_steps）不会消耗任务重试额度，直接落 failed 并
+发出唯一一条 `run.failed` 事件。
+
 ## 关键入口
 
 ```text

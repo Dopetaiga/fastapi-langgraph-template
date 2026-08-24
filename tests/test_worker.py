@@ -254,3 +254,32 @@ class TestWorkerQueueInterface:
                     await task
 
         asyncio.run(run())
+
+    def test_non_retryable_job_fails_immediately_without_retry_wait(self):
+        """Deterministic failures burn no retry attempts and emit one terminal event."""
+        from app.services.errors import JobNotRetryable
+
+        events = FakeEventRepository()
+
+        async def handler(_job):
+            raise JobNotRetryable("model_error: invalid request payload")
+
+        queue = WorkerQueue(handler=handler, event_repository=events)
+        fake_job = MagicMock(id="job-det", run_id="run-det")
+        fake_job.id = "job-det"
+        fake_job.run_id = "run-det"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "fail", AsyncMock()) as mock_fail:
+                    with patch.object(queue, "_fail_without_retry", AsyncMock()) as fail_now:
+                        with patch.object(queue, "_set_run_status", AsyncMock()):
+                            assert await queue.run_once() is True
+                            mock_fail.assert_not_called()          # no retry_wait scheduling
+                            fail_now.assert_awaited_once()
+
+        asyncio.run(run())
+        assert len(events.events) == 1
+        assert events.events[0].type.value == "run.failed"

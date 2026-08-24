@@ -35,6 +35,7 @@ from app.observability.telemetry import traced_span
 from app.runtime.checkpoints import postgres_checkpointer
 from app.services.approval_repository import ApprovalRepository
 from app.services.errors import (
+    JobNotRetryable,
     ModelCallError,
     RunCancelledError,
     RunPausedError,
@@ -72,6 +73,8 @@ class RunManager:
             api_base=settings.litellm_api_base,
             api_key=settings.litellm_api_key,
             default_model=settings.model_name,
+            num_retries=settings.model_call_num_retries,
+            request_timeout=settings.model_call_timeout_seconds,
         )
         self._model_catalog = model_catalog or ModelCatalogService(
             api_base=settings.litellm_api_base,
@@ -348,6 +351,16 @@ class RunManager:
             return status == RunStatus.cancelled.value
         raise RuntimeError("session generator exhausted")
 
+    @staticmethod
+    def execution_is_retryable(termination_reason: str | None) -> bool:
+        """Only transient failures justify burning another job attempt.
+
+        Deterministic failures (fatal model errors, exhausted max_steps) would
+        reproduce identically on retry; the generic "error" bucket stays
+        retryable because it may hide transient infrastructure faults.
+        """
+        return termination_reason in {"error", "model_error:recoverable"}
+
     async def execute_job(self, job: JobModel) -> RunStatus:
         """Worker handler that executes the immutable graph snapshot of a Run."""
         async for session in get_session():
@@ -365,7 +378,11 @@ class RunManager:
             break
         execution = await self.execute_run_sync(job.run_id, input_text)
         if execution["status"] == RunStatus.failed:
-            raise RuntimeError(execution.get("error") or "run execution failed")
+            if self.execution_is_retryable(execution.get("termination_reason")):
+                raise RuntimeError(execution.get("error") or "run execution failed")
+            raise JobNotRetryable(
+                f"{execution.get('termination_reason')}: {execution.get('error') or 'deterministic failure'}"
+            )
         return RunStatus(execution["status"])
 
     @staticmethod

@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import operator
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -152,6 +153,11 @@ def compile_langgraph(
     )
 
 
+def _new_call_id(run_id: str, node_id: str) -> str:
+    """Stable-prefix, unique-per-invocation model call identifier."""
+    return f"{run_id}:{node_id}:{uuid.uuid4().hex[:8]}"
+
+
 def _make_node(node_def: NodeDef, compiled: CompiledGraph, deps: RuntimeDependencies):
     async def run(state: LangGraphState) -> dict[str, Any]:
         run_id = str(state.get("runtime", {}).get("run_id", "unknown"))
@@ -197,6 +203,7 @@ async def _run_llm(
     result = await deps.model_gateway.complete(ModelRequest(
         model=node_def.config.get("model", deps.model_name),
         messages=messages,
+        call_id=_new_call_id(run_id, node_def.id),
         metadata={"run_id": run_id, "node_id": node_def.id},
     ))
     if not result.success:
@@ -226,6 +233,7 @@ async def _run_supervisor(
             model=node_def.config.get("model", deps.model_name),
             messages=[{"role": "system", "content": prompt}, *messages[-8:]],
             response_schema=SupervisorDecision,
+            call_id=_new_call_id(run_id, node_def.id),
             metadata={"run_id": run_id, "node_id": node_def.id},
         ))
     if not result.success or result.structured is None:

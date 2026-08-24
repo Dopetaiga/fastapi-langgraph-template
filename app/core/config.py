@@ -40,6 +40,9 @@ class Settings(BaseSettings):
         "performance": "claude-3-5-haiku-latest",
     })
     model_catalog_ttl_seconds: int = 30
+    # Client-side call budget (bounded on top of the worker job budget).
+    model_call_num_retries: int = 1
+    model_call_timeout_seconds: float = 60.0
 
     # OpenTelemetry
     otel_enabled: bool = False
