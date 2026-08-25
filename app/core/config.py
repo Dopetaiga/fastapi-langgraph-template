@@ -32,6 +32,23 @@ class Settings(BaseSettings):
     mcp_endpoints: list[str] = Field(default_factory=list)
     openapi_urls: list[str] = Field(default_factory=list)
 
+    # Model selection (docs/MODEL_SELECTION_INTERNSHIP_PLAN.md)
+    # Tier -> logical LiteLLM model_name mapping; overridable via env JSON.
+    model_tier_map: dict[str, str] = Field(default_factory=lambda: {
+        "economy": "gpt-4o-mini",
+        "balanced": "gpt-4o-mini",
+        "performance": "claude-3-5-haiku-latest",
+    })
+    model_catalog_ttl_seconds: int = 30
+    model_capabilities: dict[str, list[str]] = Field(default_factory=lambda: {
+        "gpt-4o-mini": ["tools", "structured_output"],
+        "claude-3-5-haiku-latest": ["tools", "structured_output"],
+    })
+    # The LiteLLM Proxy owns call-level retries. Keep the SDK-to-proxy hop
+    # single-attempt so retry budgets do not multiply across both layers.
+    model_call_num_retries: int = 0
+    model_call_timeout_seconds: float = 60.0
+
     # OpenTelemetry
     otel_enabled: bool = False
     otel_service_name: str = "agent-runtime"

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import pytest
+from langgraph.errors import GraphRecursionError
 
+from app.core.state import ErrorCategory, RunStatus
 from app.runtime.run_manager import RunManager
+from app.services.errors import ModelCallError, RunCancelledError
 
 
 class TestRunManager:
@@ -23,3 +26,56 @@ class TestRunManager:
         manager = RunManager(graphs_dir="graphs")
         with pytest.raises(FileNotFoundError):
             manager.load_graph("nonexistent_graph")
+
+    def test_default_graph_is_runtime_compilable(self):
+        manager = RunManager(graphs_dir="graphs")
+        compiled = manager.load_graph("default")
+        # must not raise: create_run relies on this dry-run validation
+        manager._ensure_runtime_compilable(compiled)
+
+
+class TestFailureClassification:
+    def test_cancellation_maps_to_cancelled(self):
+        status, reason, _ = RunManager._classify_failure(RunCancelledError("cancelled by user"))
+        assert status == RunStatus.cancelled
+        assert reason == "cancelled"
+
+    def test_recursion_limit_maps_to_max_steps_not_error(self):
+        status, reason, _ = RunManager._classify_failure(GraphRecursionError("recursion limit"))
+        assert status == RunStatus.failed
+        assert reason == "max_steps"
+
+    def test_model_error_keeps_category(self):
+        exc = ModelCallError("rate limited", category=ErrorCategory.rate_limit)
+        status, reason, message = RunManager._classify_failure(exc)
+        assert status == RunStatus.failed
+        assert reason.startswith("model_error")
+        assert "rate limited" in message
+
+    def test_unknown_error_maps_to_error(self):
+        status, reason, _ = RunManager._classify_failure(ValueError("boom"))
+        assert status == RunStatus.failed
+        assert reason == "error"
+
+
+class TestJobRetryClassification:
+    @pytest.mark.parametrize("reason,retryable", [
+        ("model_error:recoverable", True),
+        ("error", True),
+        ("model_error", False),
+        ("model_error:fatal", False),
+        ("max_steps", False),
+        ("cancelled", False),
+        ("supervisor_final", False),
+        (None, False),
+    ])
+    def test_only_transient_reasons_retry(self, reason, retryable):
+        assert RunManager.execution_is_retryable(reason) is retryable
+
+    def test_recoverable_attempt_does_not_persist_terminal_failed(self):
+        assert RunManager.persisted_attempt_status(
+            RunStatus.failed, "model_error:recoverable"
+        ) == RunStatus.queued
+        assert RunManager.persisted_attempt_status(
+            RunStatus.failed, "model_error"
+        ) == RunStatus.failed

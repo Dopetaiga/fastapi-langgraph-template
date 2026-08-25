@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator
 
@@ -29,8 +30,12 @@ async def stream_run_events(
     """Replay durable events, then tail until terminal state or disconnect."""
     if not await repository.run_exists(run_id):
         raise HTTPException(status_code=404, detail="run not found")
+    cursor = after_seq
     header_id = request.headers.get("last-event-id")
-    cursor = int(header_id) if header_id is not None else after_seq
+    if header_id is not None:
+        # Tolerate malformed reconnect cursors per SSE semantics.
+        with contextlib.suppress(ValueError):
+            cursor = int(header_id)
 
     async def event_generator() -> AsyncIterator[str]:
         nonlocal cursor

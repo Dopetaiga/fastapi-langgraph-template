@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -11,11 +12,14 @@ from opentelemetry import context as otel_context
 from opentelemetry.propagate import extract, inject
 from sqlalchemy import and_, or_, select, update
 
-from app.core.state import EventType, RunStatus, RuntimeEvent
+from app.core.state import TERMINAL_RUN_STATUSES, EventType, RunStatus, RuntimeEvent
 from app.db.engine import get_session
 from app.models.db import JobModel, RunModel
 from app.observability.telemetry import traced_span, worker_jobs, worker_queue_delay
+from app.services.errors import JobLeaseLostError, JobNotRetryable
 from app.services.event_repository import RuntimeEventRepository
+
+logger = logging.getLogger(__name__)
 
 
 class WorkerQueue:
@@ -179,18 +183,40 @@ class WorkerQueue:
             }):
                 await self._set_run_status(job.run_id, RunStatus.running)
                 stop_heartbeat = asyncio.Event()
-                heartbeat_task = asyncio.create_task(self._heartbeat_loop(job.id, stop_heartbeat))
+                lease_lost = asyncio.Event()
+                handler_task = asyncio.create_task(self._invoke_handler(job))
+                heartbeat_task = asyncio.create_task(
+                    self._heartbeat_loop(job.id, stop_heartbeat, handler_task, lease_lost)
+                )
                 try:
-                    handler_result = self._handler(job)
-                    if inspect.isawaitable(handler_result):
-                        handler_result = await handler_result
+                    handler_result = await handler_task
+                except asyncio.CancelledError:
+                    if lease_lost.is_set():
+                        raise JobLeaseLostError(f"job {job.id} lost its lease") from None
+                    # Shutdown cancellation: stop the handler deterministically.
+                    handler_task.cancel()
+                    await asyncio.gather(handler_task, return_exceptions=True)
+                    raise
                 finally:
                     stop_heartbeat.set()
-                    await heartbeat_task
+                    await asyncio.gather(heartbeat_task, return_exceptions=True)
                 await self.complete(job.id)
-                if handler_result != RunStatus.paused:
+                # Handler may return the Run status it observed. Only promote a
+                # non-terminal Run to completed; paused/cancelled/failed keep
+                # the state written by the execution path or the cancel API.
+                if not isinstance(handler_result, RunStatus) or handler_result == RunStatus.completed:
                     await self._set_run_status(job.run_id, RunStatus.completed)
             worker_jobs.add(1, {"status": "paused" if handler_result == RunStatus.paused else "completed"})
+        except JobLeaseLostError:
+            # Another worker owns the job now; it drives the outcome.
+            worker_jobs.add(1, {"status": "lease_lost"})
+            logger.warning("job %s lease lost; aborting handler", job.id)
+        except JobNotRetryable as exc:
+            # Deterministic failure: retrying would reproduce it identically.
+            worker_jobs.add(1, {"status": "failed"})
+            await self._fail_without_retry(job.id, str(exc))
+            await self._set_run_status(job.run_id, RunStatus.failed, error=str(exc))
+            await self._emit_run_failed(job.run_id, str(exc), job.attempt_count)
         except Exception as exc:
             worker_jobs.add(1, {"status": "failed"})
             await self.fail(job.id, str(exc))
@@ -201,17 +227,62 @@ class WorkerQueue:
                 error=str(exc),
             )
             if attempts_exhausted:
+                await self._emit_run_failed(job.run_id, str(exc), job.attempt_count)
+            else:
+                # Task-level retry visibility: distinct from call-level llm.failed.
                 await self._event_repository.append_many(job.run_id, [RuntimeEvent(
                     seq=0,
-                    type=EventType.run_failed,
+                    type=EventType.llm_retrying,
                     run_id=job.run_id,
-                    payload={"error": str(exc), "attempts": job.attempt_count},
+                    payload={
+                        "scope": "worker_job",
+                        "attempt": job.attempt_count,
+                        "retry_in_seconds": self.retry_delay_seconds,
+                    },
                 )])
         finally:
             otel_context.detach(token)
         return True
 
-    async def _heartbeat_loop(self, job_id: str, stop: asyncio.Event) -> None:
+    async def _fail_without_retry(self, job_id: str, error: str) -> None:
+        async for session in get_session():
+            stmt = (
+                update(JobModel)
+                .where(JobModel.id == job_id, JobModel.lease_owner == self.worker_id)
+                .values(
+                    status="failed",
+                    error=error,
+                    finished_at=datetime.now(UTC),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+            )
+            await session.execute(stmt)
+            await session.commit()
+            return
+        raise RuntimeError("session generator exhausted")
+
+    async def _emit_run_failed(self, run_id: str, error: str, attempts: int | None) -> None:
+        await self._event_repository.append_many(run_id, [RuntimeEvent(
+            seq=0,
+            type=EventType.run_failed,
+            run_id=run_id,
+            payload={"error": error, "attempts": attempts},
+        )])
+
+    async def _invoke_handler(self, job: JobModel):
+        handler_result = self._handler(job)
+        if inspect.isawaitable(handler_result):
+            handler_result = await handler_result
+        return handler_result
+
+    async def _heartbeat_loop(
+        self,
+        job_id: str,
+        stop: asyncio.Event,
+        handler_task: asyncio.Task,
+        lease_lost: asyncio.Event,
+    ) -> None:
         interval = max(1.0, self.lease_seconds / 3)
         while True:
             try:
@@ -219,13 +290,21 @@ class WorkerQueue:
                 return
             except TimeoutError:
                 if not await self.heartbeat(job_id):
+                    # Lease was taken over: stop duplicating external work.
+                    lease_lost.set()
+                    handler_task.cancel()
                     return
 
     async def _set_run_status(self, run_id: str, status: RunStatus, error: str | None = None) -> None:
+        """Write run status without mutating an already terminal Run."""
         async for session in get_session():
             stmt = (
                 update(RunModel)
-                .where(RunModel.id == run_id)
+                .where(
+                    RunModel.id == run_id,
+                    (RunModel.status.notin_(TERMINAL_RUN_STATUSES))
+                    | (RunModel.status == status.value),
+                )
                 .values(status=status.value, error=error, updated_at=datetime.now(UTC))
             )
             await session.execute(stmt)
@@ -234,8 +313,20 @@ class WorkerQueue:
         raise RuntimeError("session generator exhausted")
 
     async def run_forever(self, poll_interval: float = 1.0) -> None:
-        """Run worker loop until cancelled."""
+        """Run worker loop until cancelled; transient poll failures back off."""
+        consecutive_failures = 0
         while True:
-            processed = await self.run_once()
+            try:
+                processed = await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                consecutive_failures += 1
+                delay = min(self.retry_delay_seconds * (2 ** min(consecutive_failures - 1, 5)), 60.0)
+                logger.exception("worker poll failed; retrying in %.1fs", delay)
+                await asyncio.sleep(delay)
+                continue
+            consecutive_failures = 0
             if not processed:
                 await asyncio.sleep(poll_interval)
+

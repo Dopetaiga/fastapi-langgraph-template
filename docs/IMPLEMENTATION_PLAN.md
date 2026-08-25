@@ -1,5 +1,8 @@
 # Implementation Plan
 
+> 模型目录、具体模型选择、自动分档、双层重试与观测闭环的专项实施顺序，见
+> [MODEL_SELECTION_INTERNSHIP_PLAN.md](MODEL_SELECTION_INTERNSHIP_PLAN.md)。
+
 ## Working Principle
 
 Build vertical slices.

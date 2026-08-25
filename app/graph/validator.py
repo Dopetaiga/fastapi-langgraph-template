@@ -5,14 +5,17 @@ Validates:
   - no nested subagent (invariant A7)
   - no duplicate node ids
   - all edge targets exist
+  - entry references an existing node (or the legacy START marker)
+  - every node is reachable from the entry
   - no invalid node type (invariant A1)
-  - no illegal runtime fields patched by normal nodes
 """
 from __future__ import annotations
 
 from app.core.state import NodeType
 from app.graph.schemas import AgentDefinition
 from app.services.errors import GraphValidationError
+
+_CAPABILITY_TYPES = {"tool", "rag", "subagent", "approval"}
 
 
 def validate_graph(definition: AgentDefinition) -> AgentDefinition:
@@ -22,6 +25,7 @@ def validate_graph(definition: AgentDefinition) -> AgentDefinition:
     _check_node_types(definition)
     _check_at_most_one_supervisor(definition)
     _check_no_nested_subagent(definition)
+    _check_entry_reachable(definition)
     return definition
 
 
@@ -73,3 +77,48 @@ def _check_no_nested_subagent(definition: AgentDefinition) -> None:
                     raise GraphValidationError(
                         "nested subagent detected: subagent nodes may not contain subagent nodes"
                     )
+
+
+def _check_entry_reachable(definition: AgentDefinition) -> None:
+    """Entry must exist, and every node must be reachable from it.
+
+    Adjacency includes the implicit runtime edges: the Supervisor dispatches to
+    every capability node and capabilities return to the Supervisor (A3).
+    """
+    known = {n.id for n in definition.nodes}
+    node_types = {n.id: n.type for n in definition.nodes}
+    supervisor_ids = [nid for nid, t in node_types.items() if t == "supervisor"]
+
+    if definition.entry != "START" and definition.entry not in known:
+        raise GraphValidationError(f"entry does not reference an existing node: {definition.entry}")
+
+    adjacency: dict[str, set[str]] = {nid: set() for nid in known}
+    for edge in definition.edges:
+        adjacency[edge.source].add(edge.target)
+    for supervisor_id in supervisor_ids:
+        for nid, ntype in node_types.items():
+            if ntype in _CAPABILITY_TYPES:
+                # dynamic dispatch supervisor -> capability and A3 return edge
+                adjacency[supervisor_id].add(nid)
+                adjacency[nid].add(supervisor_id)
+
+    if definition.entry in known:
+        roots = [definition.entry]
+    else:  # legacy START marker: start from nodes without incoming edges
+        targets = {edge.target for edge in definition.edges}
+        roots = [nid for nid in sorted(known) if nid not in targets]
+    if not roots:
+        roots = sorted(known)
+
+    seen: set[str] = set()
+    frontier = list(roots)
+    while frontier:
+        current = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        frontier.extend(adjacency.get(current, ()) - seen)
+
+    unreachable = sorted(known - seen)
+    if unreachable:
+        raise GraphValidationError(f"unreachable nodes from entry: {unreachable}")

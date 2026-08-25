@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field
 
 from app.core.state import ErrorCategory, NormalizedError
-from app.observability.telemetry import record_llm_usage, traced_span
+from app.observability.telemetry import record_llm_outcome, record_llm_usage, traced_span
 
 
 class ModelRequest(BaseModel):
@@ -19,6 +19,9 @@ class ModelRequest(BaseModel):
     messages: list[dict[str, Any]]
     temperature: float = 0.0
     response_schema: type[BaseModel] | None = Field(default=None, exclude=True)
+    # Stable per-invocation identifier correlating retries across logs,
+    # spans, and events: "<run_id>:<node_id>:<nonce>".
+    call_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -26,6 +29,9 @@ class ModelResult(BaseModel):
     content: str = ""
     structured: dict[str, Any] | None = None
     model: str | None = None
+    served_model: str | None = None
+    fallback: bool = False
+    call_id: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     error: NormalizedError | None = None
 
@@ -59,31 +65,54 @@ class ModelGateway(Protocol):
 
 
 class LiteLLMModelGateway:
-    """The single V1 ModelGateway implementation."""
+    """The single V1 ModelGateway implementation.
 
-    def __init__(self, *, api_base: str, api_key: str, default_model: str) -> None:
+    Client-side budget is explicit and bounded: at most `num_retries` extra
+    HTTP attempts per call within `request_timeout`. Combined with the worker
+    job budget (max_attempts) this keeps worst-case model calls finite and
+    explainable — see docs/MODEL_SELECTION_INTERNSHIP_PLAN.md section 6.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        default_model: str,
+        num_retries: int = 1,
+        request_timeout: float = 60.0,
+    ) -> None:
         self._api_base = api_base
         self._api_key = api_key
         self._default_model = default_model
+        self._num_retries = num_retries
+        self._request_timeout = request_timeout
 
     async def complete(self, request: ModelRequest) -> ModelResult:
         try:
             from litellm import acompletion
 
             model = request.model or self._default_model
+            metadata = dict(request.metadata)
+            if request.call_id:
+                metadata.setdefault("call_id", request.call_id)
             with traced_span("llm.call", {
                 "gen_ai.request.model": model,
                 "agent.run_id": request.metadata.get("run_id"),
                 "agent.node_id": request.metadata.get("node_id"),
+                "agent.node_type": request.metadata.get("node_type"),
+                "agent.call_id": request.call_id,
                 "agent.structured_output": request.response_schema is not None,
-            }):
+            }) as span:
                 kwargs: dict[str, Any] = {
                     "model": model,
                     "messages": request.messages,
                     "temperature": request.temperature,
                     "api_base": self._api_base,
                     "api_key": self._api_key,
-                    "metadata": request.metadata,
+                    "metadata": metadata,
+                    "num_retries": self._num_retries,
+                    "timeout": self._request_timeout,
                 }
                 if request.response_schema is not None:
                     kwargs["response_format"] = request.response_schema
@@ -91,6 +120,21 @@ class LiteLLMModelGateway:
                 response = acompletion(**kwargs)
                 if inspect.isawaitable(response):
                     response = await response
+
+                served_model = getattr(response, "model", None)
+                hidden = getattr(response, "_hidden_params", {}) or {}
+                # A logical LiteLLM alias commonly differs from the physical
+                # response.model even without fallback. Only claim fallback
+                # when the gateway reports it explicitly.
+                fallback = bool(
+                    isinstance(hidden, dict)
+                    and any(hidden.get(key) is True for key in (
+                        "fallback", "fallback_used", "litellm_fallback"
+                    ))
+                )
+                if served_model:
+                    span.set_attribute("gen_ai.response.model", str(served_model))
+                span.set_attribute("agent.fallback", fallback)
 
             choice = response.choices[0]
             content = choice.message.content or ""
@@ -102,17 +146,22 @@ class LiteLLMModelGateway:
             if getattr(response, "usage", None) is not None:
                 usage_obj = response.usage
                 usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else dict(usage_obj)
-            hidden = getattr(response, "_hidden_params", {}) or {}
             raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
             record_llm_usage(model, usage, raw_cost if isinstance(raw_cost, (int, float)) else None)
+            record_llm_outcome(model, outcome="ok", fallback=fallback)
             return ModelResult(
                 content=content,
                 structured=structured,
-                model=getattr(response, "model", None),
+                model=model,
+                served_model=served_model,
+                fallback=fallback,
+                call_id=request.call_id,
                 usage=usage,
             )
         except Exception as exc:
-            return ModelResult(error=_normalize_model_error(exc))
+            error = _normalize_model_error(exc)
+            record_llm_outcome(request.model or self._default_model, outcome="error")
+            return ModelResult(call_id=request.call_id, error=error)
 
     async def embed(self, request: EmbeddingRequest) -> EmbeddingResult:
         try:
@@ -150,10 +199,22 @@ class LiteLLMModelGateway:
 def _normalize_model_error(exc: Exception) -> NormalizedError:
     name = type(exc).__name__.lower()
     message = str(exc)
-    if "timeout" in name:
+    status_code = getattr(exc, "status_code", None)
+    if "timeout" in name or status_code in {408, 504}:
         return NormalizedError(category=ErrorCategory.timeout, message=message, recoverable=True)
-    if "ratelimit" in name or "rate_limit" in name:
+    if "ratelimit" in name or "rate_limit" in name or status_code == 429:
         return NormalizedError(category=ErrorCategory.rate_limit, message=message, recoverable=True)
-    if "permission" in name or "authentication" in name:
+    if "permission" in name or "authentication" in name or status_code in {401, 403}:
         return NormalizedError(category=ErrorCategory.permission_denied, message=message)
-    return NormalizedError(category=ErrorCategory.provider_error, message=message, recoverable=True)
+    transient_names = ("connection", "serviceunavailable", "internalserver", "apiconnection")
+    if any(fragment in name for fragment in transient_names) or (
+        isinstance(status_code, int) and 500 <= status_code < 600
+    ):
+        return NormalizedError(
+            category=ErrorCategory.provider_error,
+            message=message,
+            recoverable=True,
+        )
+    # Bad requests, missing models, context overflow, response validation and
+    # unknown programming errors are deterministic by default.
+    return NormalizedError(category=ErrorCategory.provider_error, message=message)

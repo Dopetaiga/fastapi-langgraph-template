@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import approvals, graphs, health, memory, rag, runs, streaming
+from app.api import approvals, graphs, health, memory, models, rag, runs, streaming
 from app.core.config import settings
 from app.observability.telemetry import instrument_fastapi, setup_telemetry
 
@@ -32,6 +32,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.include_router(health.router)
+    application.include_router(models.router)
     application.include_router(runs.router)
     application.include_router(approvals.router)
     application.include_router(memory.router)

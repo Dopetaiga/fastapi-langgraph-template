@@ -1,0 +1,44 @@
+# Example: tiered model groups with bounded retries and fallback.
+#
+# This file is a REFERENCE for docs/MODEL_SELECTION_INTERNSHIP_PLAN.md M4.
+# Copy the relevant blocks into your active scripts/litellm_config.yaml —
+# do not point the compose stack at this example blindly, since it needs
+# real provider credentials for every referenced model.
+#
+# Retry budget contract (worst case per model call):
+#   worker job attempts (3) x SDK-to-proxy attempts (1) x proxy group tries (2)
+# Keep every layer small so the product stays finite and explainable.
+
+version: "1.0"
+
+litellm_settings:
+  drop_params: true
+  request_timeout: 60
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+model_list:
+  # Tier groups consumed by MODEL_TIER_MAP (economy/balanced/performance).
+  - model_name: agent-economy
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: agent-balanced
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: agent-performance
+    litellm_params:
+      model: anthropic/claude-3-5-haiku-latest
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 1          # proxy-side short retry inside one group
+  timeout: 30
+  fallbacks:
+    - agent-performance: [agent-balanced]   # transient failure degrades, never loops
+    - agent-balanced: [agent-economy]

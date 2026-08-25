@@ -84,7 +84,9 @@ class TestWorkerQueueInterface:
                         mock_fail.assert_called_once()
 
         asyncio.run(run())
-        assert events.events == []
+        # a recoverable failure schedules a task-level retry event
+        assert [event.type.value for event in events.events] == ["llm.retrying"]
+        assert events.events[0].payload["scope"] == "worker_job"
 
     def test_run_once_awaits_async_handler(self):
         handled = []
@@ -171,11 +173,115 @@ class TestWorkerQueueInterface:
 
         async def run():
             stop = asyncio.Event()
+            handler_task = asyncio.create_task(asyncio.sleep(3600))
+            lease_lost = asyncio.Event()
             with patch.object(queue, "heartbeat", AsyncMock(return_value=True)) as heartbeat:
-                task = asyncio.create_task(queue._heartbeat_loop("job-1", stop))
+                task = asyncio.create_task(
+                    queue._heartbeat_loop("job-1", stop, handler_task, lease_lost)
+                )
                 await asyncio.sleep(1.05)
                 stop.set()
                 await task
                 heartbeat.assert_awaited()
+            handler_task.cancel()
 
         asyncio.run(run())
+
+    def test_heartbeat_loss_cancels_handler(self):
+        """When the lease is taken over the handler is cancelled and no
+        terminal state is written by this worker."""
+        events = FakeEventRepository()
+        started = []
+
+        async def handler(_job):
+            started.append(True)
+            await asyncio.sleep(30)
+
+        queue = WorkerQueue(handler=handler, event_repository=events, lease_seconds=0.05)
+        fake_job = MagicMock(id="job-lease", run_id="run-lease")
+        fake_job.id = "job-lease"
+        fake_job.run_id = "run-lease"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "complete", AsyncMock()) as mock_complete:
+                    with patch.object(queue, "fail", AsyncMock()) as mock_fail:
+                        with patch.object(queue, "_set_run_status", AsyncMock()):
+                            with patch.object(queue, "heartbeat", AsyncMock(return_value=False)):
+                                result = await queue.run_once()
+                                assert result is True
+                                mock_complete.assert_not_called()
+                                mock_fail.assert_not_called()
+
+        asyncio.run(run())
+        assert started == [True]
+
+    def test_cancelled_handler_result_does_not_overwrite_terminal_status(self):
+        async def handler(_job):
+            return RunStatus.cancelled
+
+        queue = WorkerQueue(handler=handler)
+        fake_job = MagicMock(id="job-cancel", run_id="run-cancel")
+        fake_job.id = "job-cancel"
+        fake_job.run_id = "run-cancel"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "complete", AsyncMock()):
+                    with patch.object(queue, "_set_run_status", AsyncMock()) as set_status:
+                        assert await queue.run_once() is True
+                        statuses = [call.args[1] for call in set_status.await_args_list]
+                        assert RunStatus.completed not in statuses
+                        assert statuses.count(RunStatus.running) == 1
+
+        asyncio.run(run())
+
+    def test_run_forever_survives_transient_claim_failure(self):
+        queue, calls = _make_queue()
+        queue.retry_delay_seconds = 0
+
+        async def run():
+            with patch.object(
+                queue, "run_once",
+                AsyncMock(side_effect=[RuntimeError("db down"), False]),
+            ):
+                task = asyncio.create_task(queue.run_forever(poll_interval=0.01))
+                await asyncio.sleep(0.2)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(run())
+
+    def test_non_retryable_job_fails_immediately_without_retry_wait(self):
+        """Deterministic failures burn no retry attempts and emit one terminal event."""
+        from app.services.errors import JobNotRetryable
+
+        events = FakeEventRepository()
+
+        async def handler(_job):
+            raise JobNotRetryable("model_error: invalid request payload")
+
+        queue = WorkerQueue(handler=handler, event_repository=events)
+        fake_job = MagicMock(id="job-det", run_id="run-det")
+        fake_job.id = "job-det"
+        fake_job.run_id = "run-det"
+        fake_job.attempt_count = 1
+        fake_job.max_attempts = 3
+
+        async def run():
+            with patch.object(queue, "claim_next", AsyncMock(return_value=fake_job)):
+                with patch.object(queue, "fail", AsyncMock()) as mock_fail:
+                    with patch.object(queue, "_fail_without_retry", AsyncMock()) as fail_now:
+                        with patch.object(queue, "_set_run_status", AsyncMock()):
+                            assert await queue.run_once() is True
+                            mock_fail.assert_not_called()          # no retry_wait scheduling
+                            fail_now.assert_awaited_once()
+
+        asyncio.run(run())
+        assert len(events.events) == 1
+        assert events.events[0].type.value == "run.failed"

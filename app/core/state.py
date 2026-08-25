@@ -71,6 +71,14 @@ class SupervisorDecision(BaseModel):
 class EventType(StrEnum):
     run_started = "run.started"
     run_attempt_failed = "run.attempt_failed"
+    model_resolved = "model.resolved"
+    # LiteLLM call-level lifecycle (call-scoped, carries call_id)
+    llm_requested = "llm.requested"
+    llm_completed = "llm.completed"
+    llm_failed = "llm.failed"
+    llm_fallback = "llm.fallback"
+    # Worker task-level retry of a recoverable failure
+    llm_retrying = "llm.retrying"
     node_started = "node.started"
     node_completed = "node.completed"
     llm_token = "llm.token"
@@ -106,6 +114,13 @@ class RunStatus(StrEnum):
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
+
+
+TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({
+    RunStatus.completed.value,
+    RunStatus.failed.value,
+    RunStatus.cancelled.value,
+})
 
 
 class Run(BaseModel):

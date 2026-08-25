@@ -8,14 +8,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from langgraph.errors import GraphRecursionError
 from opentelemetry.propagate import inject
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.capabilities.approval import ApprovalStatus
 from app.capabilities.rag import Retriever
 from app.capabilities.subagent import ReActExecutor
 from app.core.config import settings
-from app.core.state import AgentState, EventType, RunStatus
+from app.core.state import (
+    TERMINAL_RUN_STATUSES,
+    AgentState,
+    ErrorCategory,
+    EventType,
+    RunStatus,
+    RuntimeEvent,
+)
 from app.db.engine import get_session
 from app.graph.compiler import CompiledGraph, compile_graph
 from app.graph.langgraph_runtime import RuntimeDependencies, compile_langgraph
@@ -26,9 +34,20 @@ from app.models_gateway import LiteLLMModelGateway, ModelGateway
 from app.observability.telemetry import traced_span
 from app.runtime.checkpoints import postgres_checkpointer
 from app.services.approval_repository import ApprovalRepository
-from app.services.errors import RunPausedError
+from app.services.errors import (
+    JobNotRetryable,
+    ModelCallError,
+    RunCancelledError,
+    RunPausedError,
+)
 from app.services.event_repository import RuntimeEventRepository
-from app.services.events import DurableEventEmitter
+from app.services.events import DurableEventEmitter, EventEmitter
+from app.services.model_catalog import (
+    ModelCatalogService,
+    ModelDecision,
+    ModelPolicy,
+    resolve_model_policy,
+)
 from app.services.rag_repository import PostgresRAGRepository
 from app.tools.registry import ToolRegistry
 
@@ -46,6 +65,7 @@ class RunManager:
         event_repository: RuntimeEventRepository | None = None,
         approval_repository: ApprovalRepository | None = None,
         use_postgres_checkpointer: bool = True,
+        model_catalog: ModelCatalogService | None = None,
     ) -> None:
         self._graphs_dir = graphs_dir
         self._graphs: dict[str, CompiledGraph] = {}
@@ -53,6 +73,14 @@ class RunManager:
             api_base=settings.litellm_api_base,
             api_key=settings.litellm_api_key,
             default_model=settings.model_name,
+            num_retries=settings.model_call_num_retries,
+            request_timeout=settings.model_call_timeout_seconds,
+        )
+        self._model_catalog = model_catalog or ModelCatalogService(
+            api_base=settings.litellm_api_base,
+            api_key=settings.litellm_api_key,
+            ttl_seconds=settings.model_catalog_ttl_seconds,
+            capabilities=settings.model_capabilities,
         )
         self._retriever = retriever or PostgresRAGRepository(self._model_gateway)
         self._tool_registry = tool_registry or self._default_tool_registry()
@@ -78,9 +106,37 @@ class RunManager:
         self._graphs[name] = compiled
         return compiled
 
-    async def create_run(self, session_id: str, graph_name: str, input_text: str) -> RunModel:
+    async def resolve_model_decision(
+        self,
+        model_policy: ModelPolicy | None,
+        required_capabilities: set[str] | None = None,
+    ) -> ModelDecision:
+        """Resolve the run-level model choice once, deterministically."""
+        policy = model_policy or ModelPolicy(mode="auto")
+        snapshot = await self._model_catalog.get_snapshot()
+        return resolve_model_policy(
+            policy,
+            snapshot,
+            settings.model_tier_map,
+            required_capabilities,
+        )
+
+    async def create_run(
+        self,
+        session_id: str,
+        graph_name: str,
+        input_text: str,
+        model_policy: ModelPolicy | None = None,
+    ) -> RunModel:
         run_id = str(uuid.uuid4())
         compiled = self.load_graph(graph_name)
+        self._ensure_runtime_compilable(compiled)
+        required_capabilities = {
+            "structured_output"
+            for node in compiled.definition.nodes
+            if node.type == "supervisor"
+        }
+        decision = await self.resolve_model_decision(model_policy, required_capabilities)
         snapshot = compiled.definition.model_dump(mode="json")
         definition_hash = hashlib.sha256(
             json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -102,6 +158,7 @@ class RunManager:
                 graph_version="1",
                 graph_definition_hash=definition_hash,
                 graph_snapshot=snapshot,
+                model_decision=decision.model_dump(mode="json"),
                 input_text=input_text,
             )
             session.add(run)
@@ -117,24 +174,47 @@ class RunManager:
                 trace_context=trace_context,
             ))
             await session.commit()
+            await self._event_repository.append_many(run_id, [RuntimeEvent(
+                seq=0,
+                type=EventType.model_resolved,
+                run_id=run_id,
+                payload={
+                    "requested": decision.requested,
+                    "resolved_model": decision.resolved_model,
+                    "reason": decision.reason,
+                    "catalog_version": decision.catalog_version,
+                },
+            )])
             await session.refresh(run)
             return run
         raise RuntimeError("session generator exhausted")
+
+    def _ensure_runtime_compilable(self, compiled: CompiledGraph) -> None:
+        """Fail fast at creation time when the graph cannot execute on LangGraph."""
+        dependencies = RuntimeDependencies(
+            model_gateway=self._model_gateway,
+            model_name=settings.model_name,
+            emitter=EventEmitter(),
+        )
+        compile_langgraph(compiled, dependencies)
 
     async def execute_run_sync(self, run_id: str, input_text: str) -> dict[str, Any]:
         """Execute a Run through its immutable graph snapshot."""
         compiled: CompiledGraph | None = None
         resume_value: dict[str, Any] | None = None
+        run_paused_without_approval = False
+        db_run_model_decision: dict[str, Any] = {}
         async for session in get_session():
             result = await session.execute(select(RunModel).where(RunModel.id == run_id))
             db_run = result.scalar_one_or_none()
             if db_run is None:
                 raise RuntimeError(f"run not found: {run_id}")
-            if db_run.graph_snapshot:
-                compiled = compile_graph(AgentDefinition.model_validate(db_run.graph_snapshot))
-            else:
-                compiled = self.load_graph(db_run.graph_name)
-            if db_run.termination_reason == "approval_required":
+            if isinstance(db_run.model_decision, dict):
+                db_run_model_decision = db_run.model_decision
+            if db_run.status == RunStatus.paused.value:
+                # Never re-invoke a paused thread without its resolved approval:
+                # the checkpoint would treat the input as new state and duplicate
+                # the user message through the append reducer.
                 approval_result = await session.execute(
                     select(ApprovalModel)
                     .where(
@@ -154,27 +234,51 @@ class RunManager:
                         "approval_id": resolved.id,
                         "action_id": resolved.action_id,
                     }
+                else:
+                    run_paused_without_approval = True
+            if db_run.graph_snapshot:
+                compiled = compile_graph(AgentDefinition.model_validate(db_run.graph_snapshot))
+            else:
+                compiled = self.load_graph(db_run.graph_name)
             break
         if compiled is None:
             raise RuntimeError("session generator exhausted")
 
         emitter = DurableEventEmitter(self._event_repository)
+        # The frozen decision wins over settings: resume and retry keep using
+        # the model resolved at creation time, even if the catalog changed.
+        frozen_decision = db_run_model_decision or {}
+        resolved_model = frozen_decision.get("resolved_model") or settings.model_name
         dependencies = RuntimeDependencies(
             model_gateway=self._model_gateway,
-            model_name=settings.model_name,
+            model_name=resolved_model,
             emitter=emitter,
             tool_registry=self._tool_registry,
             retriever=self._retriever,
             subagent_executor=self._subagent_executor,
             approval_repository=self._approval_repository,
+            cancel_check=self._is_cancelled,
         )
 
         initial_state = AgentState(
             messages=[{"role": "user", "content": input_text}],
         )
 
+        if run_paused_without_approval:
+            return {
+                "run_id": run_id,
+                "status": RunStatus.paused,
+                "output": "",
+                "events": [],
+                "termination_reason": "approval_required",
+                "error": None,
+            }
+
         try:
-            emitter.emit(EventType.run_started, run_id)
+            # run.started is emitted once per Run; retries and approval resumes
+            # must not duplicate it in the durable timeline.
+            if not await self._event_repository.has_event(run_id, EventType.run_started.value):
+                emitter.emit(EventType.run_started, run_id)
             with traced_span("agent.run", {
                 "agent.run_id": run_id,
                 "agent.graph_name": compiled.definition.name,
@@ -205,9 +309,9 @@ class RunManager:
                         recursion_limit=20,
                     )
             output = result_state.data.get("final_response") or ""
-            termination_reason = "supervisor_final"
             status = RunStatus.completed
             error = None
+            termination_reason = "supervisor_final"
             emitter.emit(EventType.run_completed, run_id, payload={"termination_reason": termination_reason})
         except RunPausedError as exc:
             output = ""
@@ -219,14 +323,16 @@ class RunManager:
                 payload.append(getattr(item, "value", str(item)))
             emitter.emit(EventType.approval_required, run_id, payload={"interrupts": payload})
         except Exception as exc:
+            status, termination_reason, error = self._classify_failure(exc)
             output = ""
-            termination_reason = "error"
-            status = RunStatus.failed
-            error = str(exc)
-            emitter.emit(EventType.run_attempt_failed, run_id, payload={"error": error})
+            emitter.emit(EventType.run_attempt_failed, run_id, payload={
+                "error": error,
+                "termination_reason": termination_reason,
+            })
 
         await emitter.drain()
-        await self._update_run(run_id, status, output, error, termination_reason)
+        persisted_status = self.persisted_attempt_status(status, termination_reason)
+        await self._update_run(run_id, persisted_status, output, error, termination_reason)
         return {
             "run_id": run_id,
             "status": status,
@@ -235,6 +341,50 @@ class RunManager:
             "termination_reason": termination_reason,
             "error": error,
         }
+
+    @staticmethod
+    def _classify_failure(exc: Exception) -> tuple[RunStatus, str, str]:
+        """Map an execution failure to (status, termination_reason, error).
+
+        Model-controlled completion and runtime-forced termination stay distinct.
+        """
+        message = str(exc)
+        if isinstance(exc, RunCancelledError):
+            return RunStatus.cancelled, "cancelled", message
+        if isinstance(exc, GraphRecursionError):
+            return RunStatus.failed, "max_steps", "recursion limit reached: max_steps exceeded"
+        if isinstance(exc, ModelCallError):
+            recoverable = "recoverable" if exc.recoverable else "fatal"
+            category = exc.category.value
+            if category == ErrorCategory.timeout.value or category == ErrorCategory.rate_limit.value:
+                return RunStatus.failed, f"model_error:{recoverable}", message
+            return RunStatus.failed, "model_error", message
+        return RunStatus.failed, "error", message
+
+    async def _is_cancelled(self, run_id: str) -> bool:
+        async for session in get_session():
+            status = await session.scalar(select(RunModel.status).where(RunModel.id == run_id))
+            return status == RunStatus.cancelled.value
+        raise RuntimeError("session generator exhausted")
+
+    @staticmethod
+    def execution_is_retryable(termination_reason: str | None) -> bool:
+        """Only transient failures justify burning another job attempt.
+
+        Deterministic failures (fatal model errors, exhausted max_steps) would
+        reproduce identically on retry; the generic "error" bucket stays
+        retryable because it may hide transient infrastructure faults.
+        """
+        return termination_reason in {"error", "model_error:recoverable"}
+
+    @classmethod
+    def persisted_attempt_status(
+        cls, status: RunStatus, termination_reason: str | None
+    ) -> RunStatus:
+        """Keep a retryable attempt non-terminal until the Worker exhausts its budget."""
+        if status == RunStatus.failed and cls.execution_is_retryable(termination_reason):
+            return RunStatus.queued
+        return status
 
     async def execute_job(self, job: JobModel) -> RunStatus:
         """Worker handler that executes the immutable graph snapshot of a Run."""
@@ -253,7 +403,11 @@ class RunManager:
             break
         execution = await self.execute_run_sync(job.run_id, input_text)
         if execution["status"] == RunStatus.failed:
-            raise RuntimeError(execution.get("error") or "run execution failed")
+            if self.execution_is_retryable(execution.get("termination_reason")):
+                raise RuntimeError(execution.get("error") or "run execution failed")
+            raise JobNotRetryable(
+                f"{execution.get('termination_reason')}: {execution.get('error') or 'deterministic failure'}"
+            )
         return RunStatus(execution["status"])
 
     @staticmethod
@@ -269,17 +423,27 @@ class RunManager:
         return registry
 
     async def _update_run(self, run_id: str, status: RunStatus, output: str, error: str | None, reason: str | None) -> None:
+        """Update run outcome without resurrecting or mutating terminal states.
+
+        A cancelled/failed/completed Run keeps its terminal status even if a
+        late worker attempt finishes afterwards.
+        """
         async for session in get_session():
             stmt = (
-                select(RunModel).where(RunModel.id == run_id)
+                update(RunModel)
+                .where(
+                    RunModel.id == run_id,
+                    (RunModel.status.notin_(TERMINAL_RUN_STATUSES))
+                    | (RunModel.status == status.value),
+                )
+                .values(
+                    status=status.value,
+                    output_text=output,
+                    error=error,
+                    termination_reason=reason,
+                    updated_at=datetime.now(UTC),
+                )
             )
-            result = await session.execute(stmt)
-            db_run = result.scalar_one_or_none()
-            if db_run:
-                db_run.status = status.value
-                db_run.output_text = output
-                db_run.error = error
-                db_run.termination_reason = reason
-                db_run.updated_at = datetime.now(UTC)
-                await session.commit()
+            await session.execute(stmt)
+            await session.commit()
             return

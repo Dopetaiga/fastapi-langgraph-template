@@ -8,25 +8,28 @@ from __future__ import annotations
 import os
 import uuid
 from collections import deque
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, select
 
 from app.capabilities.approval import ApprovalStatus
 from app.core.config import settings
-from app.core.state import AgentState, EventType, RuntimeEvent
+from app.core.state import AgentState, EventType, RunStatus, RuntimeEvent
 from app.db.engine import get_session
 from app.graph.compiler import compile_graph
 from app.graph.langgraph_runtime import RuntimeDependencies, compile_langgraph
 from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
-from app.models.db import JobModel, RunEventModel, RunModel, SessionModel
+from app.models.db import ApprovalModel, JobModel, RunEventModel, RunModel, SessionModel
 from app.models_gateway import EmbeddingRequest, EmbeddingResult, ModelRequest, ModelResult
 from app.runtime.checkpoints import postgres_checkpointer
+from app.runtime.run_manager import RunManager
 from app.runtime.worker import WorkerQueue
 from app.services.approval_repository import ApprovalRepository
 from app.services.errors import RunPausedError
 from app.services.event_repository import RuntimeEventRepository
 from app.services.events import EventEmitter
+from app.services.model_catalog import ModelPolicy
 from app.services.rag_repository import PostgresRAGRepository
 
 pytestmark = [
@@ -263,3 +266,266 @@ async def test_pgvector_ingest_and_cosine_retrieval() -> None:
         "Cooking pasta recipe",
     ]
     assert result.data["chunks"][0]["score"] == pytest.approx(1.0)
+
+
+async def _seed_run_with_job(
+    *,
+    session_id: str,
+    run_id: str,
+    job_id: str | None = None,
+    run_status: str = "queued",
+    job_fields: dict | None = None,
+    graph_snapshot: dict | None = None,
+) -> None:
+    async for session in get_session():
+        # Reuse the shared session row; concurrent seeds must not collide.
+        if await session.get(SessionModel, session_id) is None:
+            session.add(SessionModel(id=session_id))
+            await session.flush()
+        run = RunModel(
+            id=run_id,
+            session_id=session_id,
+            status=run_status,
+            graph_name="integration",
+            graph_version="1",
+            input_text="hello",
+            graph_snapshot=graph_snapshot,
+        )
+        session.add(run)
+        # Flush the parent explicitly: worker-table inserts elsewhere in this
+        # suite always rely on flushed parents rather than UOW ordering.
+        await session.flush()
+        if job_id is not None:
+            job_kwargs = {"status": "queued", "attempt_count": 0, "max_attempts": 3}
+            job_kwargs.update(job_fields or {})
+            session.add(JobModel(id=job_id, run_id=run_id, **job_kwargs))
+        await session.commit()
+        break
+
+
+async def _purge_queue() -> None:
+    """Wipe queue rows so leftover claimable jobs cannot cross contaminate
+    claiming tests (earlier tests legitimately leave retryable jobs behind)."""
+    async for session in get_session():
+        await session.execute(delete(RunEventModel))
+        await session.execute(delete(ApprovalModel))
+        await session.execute(delete(JobModel))
+        await session.execute(delete(RunModel))
+        await session.execute(delete(SessionModel))
+        await session.commit()
+        break
+
+
+async def test_stale_lease_is_reclaimable() -> None:
+    await _purge_queue()
+    identity = str(uuid.uuid4())
+    session_id = f"lease-session-{identity}"
+    run_id = f"lease-run-{identity}"
+    job_id = f"lease-job-{identity}"
+    await _seed_run_with_job(
+        session_id=session_id,
+        run_id=run_id,
+        job_id=job_id,
+        run_status="running",
+        job_fields={
+            "status": "running",
+            "lease_owner": "dead-worker",
+            "lease_expires_at": datetime.now(UTC) - timedelta(seconds=1),
+            "attempt_count": 1,
+        },
+    )
+
+    queue = WorkerQueue(handler=lambda _job: None, worker_id="fresh-worker")
+    claimed = await queue.claim_next()
+    assert claimed is not None
+    assert claimed.id == job_id
+    assert claimed.lease_owner == "fresh-worker"
+    assert claimed.attempt_count == 2
+
+
+async def test_cancelled_run_survives_late_worker_completion() -> None:
+    identity = str(uuid.uuid4())
+    session_id = f"cancel-session-{identity}"
+    run_id = f"cancel-run-{identity}"
+    await _seed_run_with_job(session_id=session_id, run_id=run_id, run_status="running")
+
+    # user cancels while the worker is mid-flight
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        run.status = RunStatus.cancelled.value
+        await session.commit()
+        break
+
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    await manager._update_run(run_id, RunStatus.completed, "late output", None, "supervisor_final")
+
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        assert run.status == RunStatus.cancelled.value
+        break
+
+    # worker-level status writes are conditional too
+    queue = WorkerQueue(handler=lambda _job: None)
+    await queue._set_run_status(run_id, RunStatus.completed)
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        assert run.status == RunStatus.cancelled.value
+        break
+
+
+async def test_two_workers_claim_distinct_jobs() -> None:
+    await _purge_queue()
+    identity = str(uuid.uuid4())
+    session_id = f"contend-session-{identity}"
+    run_ids = [f"contend-run-{identity}-1", f"contend-run-{identity}-2"]
+    job_ids = [f"contend-job-{identity}-1", f"contend-job-{identity}-2"]
+    for rid, jid in zip(run_ids, job_ids, strict=True):
+        await _seed_run_with_job(session_id=session_id, run_id=rid, job_id=jid)
+
+    first = WorkerQueue(handler=lambda _job: None, worker_id="worker-a")
+    second = WorkerQueue(handler=lambda _job: None, worker_id="worker-b")
+    claimed_a = await first.claim_next()
+    claimed_b = await second.claim_next()
+    assert claimed_a is not None and claimed_b is not None
+    assert {claimed_a.id, claimed_b.id} == set(job_ids)
+    assert claimed_a.lease_owner != claimed_b.lease_owner
+
+
+class StaticCatalog:
+    """Deterministic catalog double for RunManager injection."""
+
+    def __init__(self, model_id: str) -> None:
+        from app.services.model_catalog import build_snapshot
+
+        self._snapshot = build_snapshot(
+            [model_id],
+            capabilities={model_id: ["tools", "structured_output"]},
+        )
+
+    async def get_snapshot(self):
+        return self._snapshot
+
+
+async def test_create_run_freezes_model_decision_and_event() -> None:
+    identity = str(uuid.uuid4())
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    manager._model_catalog = StaticCatalog("gpt-4o-mini")
+
+    run = await manager.create_run(
+        f"policy-session-{identity}",
+        "default",
+        "hello",
+        ModelPolicy(mode="specific", model_id="gpt-4o-mini"),
+    )
+
+    assert run.model_decision is not None
+    assert run.model_decision["resolved_model"] == "gpt-4o-mini"
+    assert run.model_decision["reason"] == "user_selected"
+    assert run.model_decision["catalog_version"]
+
+    events = await RuntimeEventRepository().list_after(run.id)
+    resolved = [event for event in events if event.type == EventType.model_resolved.value]
+    assert len(resolved) == 1
+    assert resolved[0].payload["resolved_model"] == "gpt-4o-mini"
+
+    async for session in get_session():
+        db_run = await session.get(RunModel, run.id)
+        assert db_run.model_decision["resolved_model"] == "gpt-4o-mini"
+        break
+
+
+async def test_execute_uses_frozen_model_over_settings() -> None:
+    identity = str(uuid.uuid4())
+    session_id = f"frozen-session-{identity}"
+    run_id = f"frozen-run-{identity}"
+    # A supervisor-only snapshot: the capturing gateway answers "final"
+    # immediately, so execution exercises the frozen model choice end-to-end.
+    definition = AgentDefinition(
+        name="integration",
+        nodes=[NodeDef(type="supervisor", id="supervisor")],
+        edges=[],
+        entry="supervisor",
+    )
+    await _seed_run_with_job(
+        session_id=session_id,
+        run_id=run_id,
+        run_status="running",
+        graph_snapshot=definition.model_dump(mode="json"),
+    )
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        run.model_decision = {
+            "requested": {"mode": "specific", "model_id": "frozen-model", "tier": None},
+            "resolved_model": "frozen-model",
+            "resolved_tier": None,
+            "reason": "user_selected",
+            "catalog_version": "test",
+            "resolved_at": datetime.now(UTC).isoformat(),
+        }
+        await session.commit()
+        break
+
+    captured: dict = {}
+
+    class CapturingGateway:
+        async def complete(self, request):
+            captured["model"] = request.model
+            from app.models_gateway import ModelResult
+
+            return ModelResult(structured={"action": "final", "final_response": "done"})
+
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    manager._model_gateway = CapturingGateway()
+    result = await manager.execute_run_sync(run_id, "hello")
+
+    assert result["status"] == RunStatus.completed
+    assert captured["model"] == "frozen-model"
+
+
+async def test_recoverable_run_attempt_remains_claimable_for_worker_retry() -> None:
+    """A recoverable graph failure must not terminalize its Run before budget exhaustion."""
+    await _purge_queue()
+    identity = str(uuid.uuid4())
+    run_id = f"retry-run-{identity}"
+    definition = AgentDefinition(
+        name="retry-integration",
+        nodes=[NodeDef(type="llm", id="draft")],
+        edges=[],
+        entry="draft",
+    )
+    await _seed_run_with_job(
+        session_id=f"retry-session-{identity}",
+        run_id=run_id,
+        job_id=f"retry-job-{identity}",
+        run_status="queued",
+        graph_snapshot=definition.model_dump(mode="json"),
+    )
+
+    class TransientGateway:
+        async def complete(self, _request):
+            from app.core.state import ErrorCategory, NormalizedError
+            from app.models_gateway import ModelResult
+
+            return ModelResult(error=NormalizedError(
+                category=ErrorCategory.timeout,
+                message="temporary timeout",
+                recoverable=True,
+            ))
+
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    manager._model_gateway = TransientGateway()
+    queue = WorkerQueue(manager.execute_job, worker_id="retry-worker", retry_delay_seconds=0)
+
+    assert await queue.run_once() is True
+
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        job = await session.scalar(select(JobModel).where(JobModel.run_id == run_id))
+        assert run.status == RunStatus.queued.value
+        assert job.status == "retry_wait"
+        break
+
+    reclaimed = await queue.claim_next()
+    assert reclaimed is not None
+    assert reclaimed.run_id == run_id
+    assert reclaimed.attempt_count == 2
