@@ -1,10 +1,10 @@
 @echo off
-REM ─────────────────────────────────────────────────────────────────────────────
-REM test.bat — run tests (Windows)
+REM -----------------------------------------------------------------------------
+REM test.bat - run tests (Windows)
 REM Requires: Docker services running (Postgres + LiteLLM)
 REM Usage:   scripts\test.bat           run all tests
 REM          scripts\test.bat tests\test_health.py   run specific file
-REM ─────────────────────────────────────────────────────────────────────────────
+REM -----------------------------------------------------------------------------
 chcp 65001 >nul
 echo ============================================================
 echo   Running Tests
@@ -15,7 +15,7 @@ cd /d "%~dp0.."
 REM Ensure deps installed
 if not exist ".venv" (
     echo   Installing dependencies...
-    uv sync --frozen --group dev
+    uv sync --frozen --extra dev
 )
 
 REM Check Postgres

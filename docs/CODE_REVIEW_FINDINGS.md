@@ -1,5 +1,15 @@
 # 代码检查发现与修复记录（OxAplha 分支）
 
+## 采用前复审修正（2026-08-25）
+
+- 修复可恢复 attempt 提前把 Run 写成终态 `failed`，导致 `retry_wait` Job 无法再次领取；
+- 模型错误改为白名单式瞬时错误重试，400、上下文超限和未知错误默认不重试；
+- SDK 到 LiteLLM Proxy 不再重复重试，Proxy 短重试设为 1 次；
+- fallback 仅在 LiteLLM 返回明确元数据时记录，且之后仍发出 `llm.completed`；
+- WebUI 补齐全部 LLM 生命周期事件订阅；
+- 模型能力改为 `MODEL_CAPABILITIES` 显式配置，并在创建 Run 时校验 Supervisor
+  所需的 structured output 能力。
+
 > 检查范围：全仓库代码审查，重点是可用性、鲁棒性、路线图完成度。
 > 基线验证：`pytest` 168 passed / 3 skipped；`ruff` 全绿；`mypy --strict` 134 错误（未纳入 CI）。
 > 本文档是本分支修复工作的依据，每项标注状态：✅ 已修复 / 🔜 已缓解 / ⏸ 暂缓。

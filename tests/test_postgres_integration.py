@@ -397,7 +397,10 @@ class StaticCatalog:
     def __init__(self, model_id: str) -> None:
         from app.services.model_catalog import build_snapshot
 
-        self._snapshot = build_snapshot([model_id])
+        self._snapshot = build_snapshot(
+            [model_id],
+            capabilities={model_id: ["tools", "structured_output"]},
+        )
 
     async def get_snapshot(self):
         return self._snapshot
@@ -477,3 +480,52 @@ async def test_execute_uses_frozen_model_over_settings() -> None:
 
     assert result["status"] == RunStatus.completed
     assert captured["model"] == "frozen-model"
+
+
+async def test_recoverable_run_attempt_remains_claimable_for_worker_retry() -> None:
+    """A recoverable graph failure must not terminalize its Run before budget exhaustion."""
+    await _purge_queue()
+    identity = str(uuid.uuid4())
+    run_id = f"retry-run-{identity}"
+    definition = AgentDefinition(
+        name="retry-integration",
+        nodes=[NodeDef(type="llm", id="draft")],
+        edges=[],
+        entry="draft",
+    )
+    await _seed_run_with_job(
+        session_id=f"retry-session-{identity}",
+        run_id=run_id,
+        job_id=f"retry-job-{identity}",
+        run_status="queued",
+        graph_snapshot=definition.model_dump(mode="json"),
+    )
+
+    class TransientGateway:
+        async def complete(self, _request):
+            from app.core.state import ErrorCategory, NormalizedError
+            from app.models_gateway import ModelResult
+
+            return ModelResult(error=NormalizedError(
+                category=ErrorCategory.timeout,
+                message="temporary timeout",
+                recoverable=True,
+            ))
+
+    manager = RunManager(graphs_dir="graphs", use_postgres_checkpointer=False)
+    manager._model_gateway = TransientGateway()
+    queue = WorkerQueue(manager.execute_job, worker_id="retry-worker", retry_delay_seconds=0)
+
+    assert await queue.run_once() is True
+
+    async for session in get_session():
+        run = await session.get(RunModel, run_id)
+        job = await session.scalar(select(JobModel).where(JobModel.run_id == run_id))
+        assert run.status == RunStatus.queued.value
+        assert job.status == "retry_wait"
+        break
+
+    reclaimed = await queue.claim_next()
+    assert reclaimed is not None
+    assert reclaimed.run_id == run_id
+    assert reclaimed.attempt_count == 2

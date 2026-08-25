@@ -6,7 +6,7 @@
 # real provider credentials for every referenced model.
 #
 # Retry budget contract (worst case per model call):
-#   worker job attempts (3)  x  client num_retries+1 (2)  x  proxy group tries
+#   worker job attempts (3) x SDK-to-proxy attempts (1) x proxy group tries (2)
 # Keep every layer small so the product stays finite and explainable.
 
 version: "1.0"

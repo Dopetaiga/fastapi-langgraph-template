@@ -1,5 +1,5 @@
 const API = '';
-const EVENT_TYPES = ['model.resolved','run.started','run.attempt_failed','node.started','node.completed','tool.started','tool.completed','rag.started','rag.completed','subagent.started','subagent.completed','approval.required','checkpoint.created','run.completed','run.failed','run.cancelled'];
+const EVENT_TYPES = ['model.resolved','run.started','run.attempt_failed','llm.requested','llm.completed','llm.failed','llm.fallback','llm.retrying','node.started','node.completed','tool.started','tool.completed','rag.started','rag.completed','subagent.started','subagent.completed','approval.required','checkpoint.created','run.completed','run.failed','run.cancelled'];
 const titles = {runs:'运行工作台',approvals:'人工审批',knowledge:'知识检索',memory:'长期记忆',graph:'图结构'};
 
 const app = {
@@ -69,7 +69,7 @@ const app = {
       else { hint.classList.remove('warn'); this.updatePolicyHint(); }
     } catch {
       const hint = document.querySelector('#policy-hint');
-      hint.textContent = '模型目录不可用（LiteLLM 未启动？），仍可用 auto 策略创建。'; hint.classList.add('warn');
+      hint.textContent = '模型目录不可用（LiteLLM 未启动？），暂时无法创建新的 Run。'; hint.classList.add('warn');
     }
   },
 

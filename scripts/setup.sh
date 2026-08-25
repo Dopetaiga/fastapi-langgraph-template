@@ -40,7 +40,7 @@ echo "  Postgres is ready."
 
 # ── 4. Install dependencies ────────────────────────────────────────────────
 echo "[4/5] Installing Python dependencies..."
-uv sync --frozen --group dev
+uv sync --frozen --extra dev
 
 # ── 5. Run database migrations ─────────────────────────────────────────────
 echo "[5/5] Running database migrations..."

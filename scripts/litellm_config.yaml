@@ -3,23 +3,21 @@ version: "1.0"
 litellm_settings:
   drop_params: true
   request_timeout: 60
-  max_retries: 2
   retry_delay: 1
 
 general_settings:
-  master_key: ${LITELLM_MASTER_KEY}
-  database_url: ${DATABASE_URL}
+  master_key: os.environ/LITELLM_MASTER_KEY
 
 model_list:
   - model_name: gpt-4o-mini
     litellm_params:
       model: openai/gpt-4o-mini
-      api_key: ${OPENAI_API_KEY}
+      api_key: os.environ/OPENAI_API_KEY
   - model_name: claude-3-5-haiku-latest
     litellm_params:
       model: anthropic/claude-3-5-haiku-latest
-      api_key: ${ANTHROPIC_API_KEY}
+      api_key: os.environ/ANTHROPIC_API_KEY
 
 router_settings:
   routing_strategy: simple-shuffle
-  num_retries: 2
+  num_retries: 1

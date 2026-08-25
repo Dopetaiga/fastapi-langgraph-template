@@ -21,10 +21,11 @@ class _FakeChoice:
 
 
 class _FakeResponse:
-    def __init__(self, model: str = "gpt-4o-mini") -> None:
+    def __init__(self, model: str = "gpt-4o-mini", hidden: dict | None = None) -> None:
         self.choices = [_FakeChoice()]
         self.model = model
         self.usage = None
+        self._hidden_params = hidden or {}
 
 
 @pytest.fixture()
@@ -69,7 +70,7 @@ class TestCallBudget:
         assert captured[0]["metadata"]["call_id"] == "run-1:draft:deadbeef"
         assert result.call_id == "run-1:draft:deadbeef"
 
-    async def test_served_model_mismatch_marks_fallback(self, monkeypatch):
+    async def test_served_model_mismatch_alone_does_not_claim_fallback(self, monkeypatch):
         async def fake_acompletion(**_kwargs):
             return _FakeResponse(model="agent-economy")
 
@@ -82,9 +83,20 @@ class TestCallBudget:
             messages=[{"role": "user", "content": "hi"}],
             call_id="r:n:11111111",
         ))
-        assert result.fallback is True
+        assert result.fallback is False
         assert result.served_model == "agent-economy"
         assert result.model == "agent-performance"
+
+    async def test_explicit_gateway_metadata_marks_fallback(self, monkeypatch):
+        async def fake_acompletion(**_kwargs):
+            return _FakeResponse(model="agent-economy", hidden={"fallback_used": True})
+
+        import litellm
+
+        monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+        gateway = LiteLLMModelGateway(api_base="x", api_key="k", default_model="m")
+        result = await gateway.complete(ModelRequest(model="agent-performance", messages=[]))
+        assert result.fallback is True
 
     async def test_matching_served_model_is_not_fallback(self, captured):
         gateway = LiteLLMModelGateway(api_base="x", api_key="k", default_model="m")
@@ -108,6 +120,32 @@ class TestCallBudget:
         ))
         assert result.success is False
         assert result.call_id == "r:n:12345678"
+
+    @pytest.mark.parametrize(
+        "error_type,recoverable",
+        [
+            (type("RateLimitError", (Exception,), {}), True),
+            (type("APIConnectionError", (Exception,), {}), True),
+            (type("InternalServerError", (Exception,), {}), True),
+            (type("BadRequestError", (Exception,), {}), False),
+            (type("ContextWindowExceededError", (Exception,), {}), False),
+            (type("NotFoundError", (Exception,), {}), False),
+            (ValueError, False),
+        ],
+    )
+    async def test_error_matrix_only_retries_transient_failures(
+        self, monkeypatch, error_type, recoverable
+    ):
+        async def failing(**_kwargs):
+            raise error_type("boom")
+
+        import litellm
+
+        monkeypatch.setattr(litellm, "acompletion", failing)
+        gateway = LiteLLMModelGateway(api_base="x", api_key="k", default_model="m")
+        result = await gateway.complete(ModelRequest(model="m", messages=[]))
+        assert result.error is not None
+        assert result.error.recoverable is recoverable
 
     def test_new_call_id_shape(self):
         call_id = _new_call_id("run-7", "supervisor")

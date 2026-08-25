@@ -20,6 +20,7 @@ def get_catalog_service() -> ModelCatalogService:
             api_base=settings.litellm_api_base,
             api_key=settings.litellm_api_key,
             ttl_seconds=settings.model_catalog_ttl_seconds,
+            capabilities=settings.model_capabilities,
         )
     return _catalog_service
 

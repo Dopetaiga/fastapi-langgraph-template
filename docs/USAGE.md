@@ -35,6 +35,9 @@
 前端不接触 LiteLLM 凭据。决策快照含 requested/resolved/reason/catalog_version，
 配合 `model.resolved` 事件可完整解释一次 Run 的模型选择。
 
+模型能力来自服务端 `MODEL_CAPABILITIES` 显式配置，不根据名称猜测。未配置的
+模型仍可出现在目录中，但不会宣称支持 tools、structured output 或 vision。
+
 ### 调用预算与错误分类
 
 每次模型调用携带稳定 `call_id`（`run_id:node_id:nonce`），贯穿 span、metadata

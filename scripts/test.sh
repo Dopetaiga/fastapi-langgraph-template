@@ -19,7 +19,7 @@ cd "$PROJECT_ROOT"
 # Ensure deps installed
 if [ ! -d ".venv" ]; then
     echo "  Installing dependencies..."
-    uv sync --frozen --group dev
+    uv sync --frozen --extra dev
 fi
 
 # Check Postgres is up

@@ -240,8 +240,9 @@ def _emit_llm_done(
         "served_model": result.served_model,
         "fallback": result.fallback,
     }
-    event_type = EventType.llm_fallback if result.fallback else EventType.llm_completed
-    deps.emitter.emit(event_type, run_id, node=node_id, payload=payload)
+    if result.fallback:
+        deps.emitter.emit(EventType.llm_fallback, run_id, node=node_id, payload=payload)
+    deps.emitter.emit(EventType.llm_completed, run_id, node=node_id, payload=payload)
 
 
 async def _run_supervisor(

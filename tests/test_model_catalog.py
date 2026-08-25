@@ -44,6 +44,19 @@ class TestModelPolicy:
         with pytest.raises(ValidationError):
             ModelPolicy(mode="tier", tier="ultra")
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"mode": "specific", "model_id": "m", "tier": "balanced"},
+            {"mode": "tier", "tier": "balanced", "model_id": "m"},
+            {"mode": "auto", "model_id": "m"},
+            {"mode": "auto", "tier": "balanced"},
+        ],
+    )
+    def test_rejects_fields_from_another_policy_mode(self, payload):
+        with pytest.raises(ValidationError):
+            ModelPolicy.model_validate(payload)
+
 
 class TestBuildSnapshot:
     def test_filters_embedding_models(self):
@@ -59,6 +72,20 @@ class TestBuildSnapshot:
         assert first.version == again.version
         assert first.version != other.version
 
+    def test_capabilities_are_explicit_not_assumed(self):
+        snapshot = build_snapshot(
+            ["known", "unknown"],
+            capabilities={"known": ["tools", "structured_output"]},
+        )
+        entries = {entry.catalog_id: entry for entry in snapshot.entries}
+        assert entries["known"].capabilities == ["tools", "structured_output"]
+        assert entries["unknown"].capabilities == []
+
+    def test_capability_change_updates_catalog_version(self):
+        plain = build_snapshot(["known"])
+        capable = build_snapshot(["known"], capabilities={"known": ["tools"]})
+        assert plain.version != capable.version
+
 
 class TestResolvePolicy:
     def test_specific_selects_existing_model(self):
@@ -72,6 +99,27 @@ class TestResolvePolicy:
     def test_specific_unknown_model_rejected(self):
         with pytest.raises(ModelSelectionError, match="not selectable"):
             resolve_model_policy(ModelPolicy(mode="specific", model_id="ghost"), _snapshot("gpt-4o-mini"), TIER_MAP)
+
+    def test_required_capability_must_be_explicitly_declared(self):
+        with pytest.raises(ModelSelectionError, match="lacks required capabilities"):
+            resolve_model_policy(
+                ModelPolicy(mode="specific", model_id="plain"),
+                _snapshot("plain"),
+                TIER_MAP,
+                {"structured_output"},
+            )
+
+        snapshot = build_snapshot(
+            ["capable"],
+            capabilities={"capable": ["structured_output"]},
+        )
+        decision = resolve_model_policy(
+            ModelPolicy(mode="specific", model_id="capable"),
+            snapshot,
+            TIER_MAP,
+            {"structured_output"},
+        )
+        assert decision.resolved_model == "capable"
 
     def test_embedding_model_not_selectable(self):
         with pytest.raises(ModelSelectionError, match="not selectable"):

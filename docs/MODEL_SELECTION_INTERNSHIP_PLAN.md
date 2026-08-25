@@ -127,7 +127,7 @@ queued -> running -> paused -> completed
 ### LiteLLM 调用级
 
 - 负责 429、短时 5xx、连接抖动和同一逻辑模型组内 fallback；
-- 建议最多 1 至 2 次短重试；
+- LiteLLM Proxy 最多进行 1 次短重试；Runtime 到 Proxy 的 SDK 调用不再重复重试；
 - 参数、鉴权、能力不支持、上下文超限等确定性错误不重试。
 
 ### Runtime Worker 任务级
@@ -147,6 +147,9 @@ queued -> running -> paused -> completed
 - 创建 Run 时进行严格校验；
 - Worker 开始执行时只做轻量一致性检查，不主动逐模型探活；
 - 实际调用失败由 LiteLLM 返回，Runtime 负责错误标准化。
+
+模型能力不从模型名称猜测，也不默认所有模型都支持工具或结构化输出。V1 使用
+`MODEL_CAPABILITIES` 显式静态配置；未配置模型返回空能力列表。
 
 ## 7. 信息流
 

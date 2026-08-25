@@ -25,7 +25,12 @@ def _client(service) -> TestClient:
 
 
 def test_models_endpoint_returns_safe_catalog_shape():
-    snapshot = build_snapshot(["claude-3-5-haiku-latest", "gpt-4o-mini"], now=datetime(2026, 8, 24, tzinfo=UTC))
+    model_ids = ["claude-3-5-haiku-latest", "gpt-4o-mini"]
+    snapshot = build_snapshot(
+        model_ids,
+        now=datetime(2026, 8, 24, tzinfo=UTC),
+        capabilities={model_id: ["tools", "structured_output"] for model_id in model_ids},
+    )
     response = _client(FakeCatalogService(snapshot)).get("/models")
 
     assert response.status_code == 200

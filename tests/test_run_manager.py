@@ -71,3 +71,11 @@ class TestJobRetryClassification:
     ])
     def test_only_transient_reasons_retry(self, reason, retryable):
         assert RunManager.execution_is_retryable(reason) is retryable
+
+    def test_recoverable_attempt_does_not_persist_terminal_failed(self):
+        assert RunManager.persisted_attempt_status(
+            RunStatus.failed, "model_error:recoverable"
+        ) == RunStatus.queued
+        assert RunManager.persisted_attempt_status(
+            RunStatus.failed, "model_error"
+        ) == RunStatus.failed

@@ -36,15 +36,19 @@ class ModelPolicy(BaseModel):
             raise ValueError("mode 'specific' requires model_id")
         if self.mode == "tier" and not self.tier:
             raise ValueError("mode 'tier' requires tier")
+        if self.mode != "specific" and self.model_id is not None:
+            raise ValueError("model_id is only valid for mode 'specific'")
+        if self.mode != "tier" and self.tier is not None:
+            raise ValueError("tier is only valid for mode 'tier'")
         return self
 
 
 class ModelCatalogEntry(BaseModel):
     catalog_id: str
     display_name: str
-    # V1 claims are conservative and static; per-model capability probing is
-    # deliberately deferred (see docs/MODEL_SELECTION_INTERNSHIP_PLAN.md M1).
-    capabilities: list[str] = Field(default_factory=lambda: ["tools", "structured_output"])
+    # LiteLLM's model list does not prove capabilities. V1 only exposes
+    # explicitly configured, conservative claims; unknown models claim none.
+    capabilities: list[str] = Field(default_factory=list)
     selectable: bool = True
     availability: Literal["available", "stale"] = "available"
 
@@ -76,20 +80,32 @@ class ModelDecision(BaseModel):
     resolved_at: datetime
 
 
-def build_snapshot(model_ids: list[str], *, now: datetime | None = None) -> ModelCatalogSnapshot:
+def build_snapshot(
+    model_ids: list[str],
+    *,
+    now: datetime | None = None,
+    capabilities: dict[str, list[str]] | None = None,
+) -> ModelCatalogSnapshot:
     """Build a snapshot from raw logical model ids.
 
     Embedding models are excluded from the chat selection list.
     """
     cleaned_at = now or datetime.now(UTC)
+    capability_map = capabilities or {}
     entries = [
-        ModelCatalogEntry(catalog_id=model_id, display_name=model_id)
+        ModelCatalogEntry(
+            catalog_id=model_id,
+            display_name=model_id,
+            capabilities=list(capability_map.get(model_id, [])),
+        )
         for model_id in sorted(dict.fromkeys(model_ids))
         if "embed" not in model_id.lower()
     ]
-    version = hashlib.sha256(
-        ",".join(entry.catalog_id for entry in entries).encode("utf-8")
-    ).hexdigest()[:16]
+    version_payload = "|".join(
+        f"{entry.catalog_id}:{','.join(entry.capabilities)}:{entry.selectable}"
+        for entry in entries
+    )
+    version = hashlib.sha256(version_payload.encode("utf-8")).hexdigest()[:16]
     return ModelCatalogSnapshot(version=version, fetched_at=cleaned_at, entries=entries)
 
 
@@ -102,11 +118,13 @@ class ModelCatalogService:
         api_base: str,
         api_key: str,
         ttl_seconds: int = 30,
+        capabilities: dict[str, list[str]] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
         self._ttl_seconds = ttl_seconds
+        self._capabilities = capabilities or {}
         self._client = client
         self._snapshot: ModelCatalogSnapshot | None = None
         self._cached_at: float | None = None
@@ -171,21 +189,29 @@ class ModelCatalogService:
         ids = [str(row["id"]) for row in rows if isinstance(row, dict) and row.get("id")]
         if not ids:
             raise ModelSelectionError("model catalog returned no models", http_status=503)
-        return build_snapshot(ids)
+        return build_snapshot(ids, capabilities=self._capabilities)
 
 
 def resolve_model_policy(
     policy: ModelPolicy,
     snapshot: ModelCatalogSnapshot,
     tier_map: dict[str, str],
+    required_capabilities: set[str] | None = None,
 ) -> ModelDecision:
     """Deterministically resolve a policy against a catalog snapshot."""
     selectable = snapshot.selectable_ids()
+    entries = {entry.catalog_id: entry for entry in snapshot.entries}
+    required = required_capabilities or set()
 
     def _require(model_id: str) -> str:
         if model_id not in selectable:
             raise ModelSelectionError(
                 f"model '{model_id}' is not selectable in the current catalog"
+            )
+        missing = required - set(entries[model_id].capabilities)
+        if missing:
+            raise ModelSelectionError(
+                f"model '{model_id}' lacks required capabilities: {sorted(missing)}"
             )
         return model_id
 

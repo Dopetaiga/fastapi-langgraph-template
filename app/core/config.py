@@ -40,8 +40,13 @@ class Settings(BaseSettings):
         "performance": "claude-3-5-haiku-latest",
     })
     model_catalog_ttl_seconds: int = 30
-    # Client-side call budget (bounded on top of the worker job budget).
-    model_call_num_retries: int = 1
+    model_capabilities: dict[str, list[str]] = Field(default_factory=lambda: {
+        "gpt-4o-mini": ["tools", "structured_output"],
+        "claude-3-5-haiku-latest": ["tools", "structured_output"],
+    })
+    # The LiteLLM Proxy owns call-level retries. Keep the SDK-to-proxy hop
+    # single-attempt so retry budgets do not multiply across both layers.
+    model_call_num_retries: int = 0
     model_call_timeout_seconds: float = 60.0
 
     # OpenTelemetry

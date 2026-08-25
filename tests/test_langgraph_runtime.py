@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.core.state import AgentState, ErrorCategory, NormalizedError, SupervisorDecision
+from app.core.state import AgentState, ErrorCategory, EventType, NormalizedError, SupervisorDecision
 from app.graph.compiler import compile_graph
 from app.graph.langgraph_runtime import RuntimeDependencies, compile_langgraph
 from app.graph.schemas import AgentDefinition, EdgeDef, NodeDef
@@ -228,6 +228,26 @@ class TestLLMLifecycleEvents:
         assert completed.payload["call_id"] == requested.payload["call_id"]
         assert completed.payload["call_id"].startswith("run-ev:draft:")
         assert completed.payload["fallback"] is False
+
+    async def test_fallback_is_followed_by_completed_event(self) -> None:
+        definition = AgentDefinition(
+            name="fallback-events",
+            nodes=[NodeDef(type="llm", id="draft")],
+            edges=[],
+            entry="draft",
+        )
+        compiled = compile_graph(definition)
+        emitter = EventEmitter()
+        gateway = FakeModelGateway(ModelResult(content="ok", served_model="other", fallback=True))
+        program = compile_langgraph(
+            compiled,
+            RuntimeDependencies(model_gateway=gateway, model_name="requested", emitter=emitter),
+        )
+
+        await program.ainvoke(AgentState(messages=[{"role": "user", "content": "hi"}]), run_id="run-fb")
+
+        llm_events = [event.type for event in emitter.all_events() if event.type.value.startswith("llm.")]
+        assert llm_events == [EventType.llm_requested, EventType.llm_fallback, EventType.llm_completed]
 
     @pytest.mark.asyncio
     async def test_failed_event_carries_category(self) -> None:

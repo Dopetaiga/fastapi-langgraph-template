@@ -80,6 +80,7 @@ class RunManager:
             api_base=settings.litellm_api_base,
             api_key=settings.litellm_api_key,
             ttl_seconds=settings.model_catalog_ttl_seconds,
+            capabilities=settings.model_capabilities,
         )
         self._retriever = retriever or PostgresRAGRepository(self._model_gateway)
         self._tool_registry = tool_registry or self._default_tool_registry()
@@ -105,11 +106,20 @@ class RunManager:
         self._graphs[name] = compiled
         return compiled
 
-    async def resolve_model_decision(self, model_policy: ModelPolicy | None) -> ModelDecision:
+    async def resolve_model_decision(
+        self,
+        model_policy: ModelPolicy | None,
+        required_capabilities: set[str] | None = None,
+    ) -> ModelDecision:
         """Resolve the run-level model choice once, deterministically."""
         policy = model_policy or ModelPolicy(mode="auto")
         snapshot = await self._model_catalog.get_snapshot()
-        return resolve_model_policy(policy, snapshot, settings.model_tier_map)
+        return resolve_model_policy(
+            policy,
+            snapshot,
+            settings.model_tier_map,
+            required_capabilities,
+        )
 
     async def create_run(
         self,
@@ -121,7 +131,12 @@ class RunManager:
         run_id = str(uuid.uuid4())
         compiled = self.load_graph(graph_name)
         self._ensure_runtime_compilable(compiled)
-        decision = await self.resolve_model_decision(model_policy)
+        required_capabilities = {
+            "structured_output"
+            for node in compiled.definition.nodes
+            if node.type == "supervisor"
+        }
+        decision = await self.resolve_model_decision(model_policy, required_capabilities)
         snapshot = compiled.definition.model_dump(mode="json")
         definition_hash = hashlib.sha256(
             json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -316,7 +331,8 @@ class RunManager:
             })
 
         await emitter.drain()
-        await self._update_run(run_id, status, output, error, termination_reason)
+        persisted_status = self.persisted_attempt_status(status, termination_reason)
+        await self._update_run(run_id, persisted_status, output, error, termination_reason)
         return {
             "run_id": run_id,
             "status": status,
@@ -360,6 +376,15 @@ class RunManager:
         retryable because it may hide transient infrastructure faults.
         """
         return termination_reason in {"error", "model_error:recoverable"}
+
+    @classmethod
+    def persisted_attempt_status(
+        cls, status: RunStatus, termination_reason: str | None
+    ) -> RunStatus:
+        """Keep a retryable attempt non-terminal until the Worker exhausts its budget."""
+        if status == RunStatus.failed and cls.execution_is_retryable(termination_reason):
+            return RunStatus.queued
+        return status
 
     async def execute_job(self, job: JobModel) -> RunStatus:
         """Worker handler that executes the immutable graph snapshot of a Run."""

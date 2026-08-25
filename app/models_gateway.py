@@ -122,7 +122,16 @@ class LiteLLMModelGateway:
                     response = await response
 
                 served_model = getattr(response, "model", None)
-                fallback = bool(served_model and model and served_model != model)
+                hidden = getattr(response, "_hidden_params", {}) or {}
+                # A logical LiteLLM alias commonly differs from the physical
+                # response.model even without fallback. Only claim fallback
+                # when the gateway reports it explicitly.
+                fallback = bool(
+                    isinstance(hidden, dict)
+                    and any(hidden.get(key) is True for key in (
+                        "fallback", "fallback_used", "litellm_fallback"
+                    ))
+                )
                 if served_model:
                     span.set_attribute("gen_ai.response.model", str(served_model))
                 span.set_attribute("agent.fallback", fallback)
@@ -137,7 +146,6 @@ class LiteLLMModelGateway:
             if getattr(response, "usage", None) is not None:
                 usage_obj = response.usage
                 usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else dict(usage_obj)
-            hidden = getattr(response, "_hidden_params", {}) or {}
             raw_cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
             record_llm_usage(model, usage, raw_cost if isinstance(raw_cost, (int, float)) else None)
             record_llm_outcome(model, outcome="ok", fallback=fallback)
@@ -191,10 +199,22 @@ class LiteLLMModelGateway:
 def _normalize_model_error(exc: Exception) -> NormalizedError:
     name = type(exc).__name__.lower()
     message = str(exc)
-    if "timeout" in name:
+    status_code = getattr(exc, "status_code", None)
+    if "timeout" in name or status_code in {408, 504}:
         return NormalizedError(category=ErrorCategory.timeout, message=message, recoverable=True)
-    if "ratelimit" in name or "rate_limit" in name:
+    if "ratelimit" in name or "rate_limit" in name or status_code == 429:
         return NormalizedError(category=ErrorCategory.rate_limit, message=message, recoverable=True)
-    if "permission" in name or "authentication" in name:
+    if "permission" in name or "authentication" in name or status_code in {401, 403}:
         return NormalizedError(category=ErrorCategory.permission_denied, message=message)
-    return NormalizedError(category=ErrorCategory.provider_error, message=message, recoverable=True)
+    transient_names = ("connection", "serviceunavailable", "internalserver", "apiconnection")
+    if any(fragment in name for fragment in transient_names) or (
+        isinstance(status_code, int) and 500 <= status_code < 600
+    ):
+        return NormalizedError(
+            category=ErrorCategory.provider_error,
+            message=message,
+            recoverable=True,
+        )
+    # Bad requests, missing models, context overflow, response validation and
+    # unknown programming errors are deterministic by default.
+    return NormalizedError(category=ErrorCategory.provider_error, message=message)
